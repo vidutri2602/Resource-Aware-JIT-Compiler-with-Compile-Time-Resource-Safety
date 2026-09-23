@@ -1,0 +1,11 @@
+# Acquire/release pairing is valid on every path.
+
+fn main() {
+  let f = acquire file "notes.txt";
+  let buf = acquire mem 64;
+  let gate = acquire lock;
+  print 1;
+  release gate;
+  release buf;
+  release f;
+}

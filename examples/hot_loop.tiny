@@ -1,0 +1,12 @@
+# Hot loop: interpreter profiles iterations, then the JIT compiles
+# the remaining trip count to bytecode.
+
+fn main() {
+  let i = 0;
+  let sum = 0;
+  while (i < 1000) {
+    sum = sum + i;
+    i = i + 1;
+  }
+  print sum;
+}

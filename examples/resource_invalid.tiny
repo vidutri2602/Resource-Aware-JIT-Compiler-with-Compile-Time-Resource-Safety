@@ -1,0 +1,6 @@
+# Rejected at compile time: file handle leaks at end of main.
+
+fn main() {
+  let f = acquire file "notes.txt";
+  print 1;
+}

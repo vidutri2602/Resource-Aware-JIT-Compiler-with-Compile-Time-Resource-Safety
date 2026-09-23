@@ -1,0 +1,14 @@
+/build/
+/build_wsl/
+/out/
+/cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+*.obj
+*.o
+*.exe
+*.pdb
+*.ilk
+.vs/
+.idea/
+.DS_Store
