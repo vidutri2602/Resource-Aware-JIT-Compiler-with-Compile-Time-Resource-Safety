@@ -1,51 +1,82 @@
 #include "Lexer.h"
+#include "Error.h"
+#include "test_support.h"
 
-#include <cstdlib>
 #include <iostream>
 #include <string>
 #include <vector>
 
-using rajit::Lexer;
-using rajit::TokenType;
+using tinyrjit::Lexer;
+using tinyrjit::Token;
+using tinyrjit::TokenType;
 
-static int failures = 0;
-
-static void expect(bool cond, const std::string& message) {
-  if (!cond) {
-    std::cerr << "FAIL: " << message << "\n";
-    failures++;
+static bool expectTypes(const std::vector<Token>& tokens, const std::vector<TokenType>& types) {
+  if (tokens.size() != types.size()) {
+    return false;
   }
+  for (std::size_t i = 0; i < types.size(); ++i) {
+    if (tokens[i].type != types[i]) {
+      return false;
+    }
+  }
+  return true;
 }
 
 int main() {
-  Lexer lexer("fn main() { let x = 12; print x; }");
-  auto tokens = lexer.tokenize();
-  expect(!tokens.empty(), "produced tokens");
-  expect(tokens.front().type == TokenType::Fn, "starts with fn");
-  expect(tokens.back().type == TokenType::EndOfFile, "ends with EOF");
+  int failed = 0;
 
-  std::vector<TokenType> expected = {
-      TokenType::Fn,         TokenType::Identifier, TokenType::LeftParen,
-      TokenType::RightParen, TokenType::LeftBrace,  TokenType::Let,
-      TokenType::Identifier, TokenType::Equal,      TokenType::Number,
-      TokenType::Semicolon,  TokenType::Print,      TokenType::Identifier,
-      TokenType::Semicolon,  TokenType::RightBrace, TokenType::EndOfFile};
-  expect(tokens.size() == expected.size(), "token count");
-  for (std::size_t i = 0; i < expected.size() && i < tokens.size(); ++i) {
-    expect(tokens[i].type == expected[i], "token " + std::to_string(i));
+  {
+    Lexer lexer("let x: Int = 10;");
+    auto tokens = lexer.tokenize();
+    if (!expectTypes(tokens, {TokenType::Let, TokenType::Identifier, TokenType::Colon, TokenType::Int,
+                              TokenType::Equal, TokenType::Number, TokenType::Semicolon,
+                              TokenType::EndOfFile})) {
+      failed += testutil::fail("keywords/identifiers/numbers");
+    } else if (tokens[1].lexeme != "x" || tokens[5].lexeme != "10") {
+      failed += testutil::fail("lexeme values");
+    } else {
+      testutil::pass("keywords identifiers numbers");
+    }
   }
 
-  Lexer ops("a == b != c <= d >= e < f > g // comment\n ident");
-  auto opTokens = ops.tokenize();
-  expect(opTokens[1].type == TokenType::EqualEqual, "==");
-  expect(opTokens[3].type == TokenType::BangEqual, "!=");
-  expect(opTokens[5].type == TokenType::LessEqual, "<=");
-  expect(opTokens[7].type == TokenType::GreaterEqual, ">=");
-
-  if (failures) {
-    std::cerr << failures << " lexer tests failed\n";
-    return EXIT_FAILURE;
+  {
+    Lexer lexer("fn if else while return Handle + - * / == <= >= ->");
+    auto tokens = lexer.tokenize();
+    if (tokens[0].type != TokenType::Fn || tokens[5].type != TokenType::Handle ||
+        tokens[11].type != TokenType::LessEqual || tokens[13].type != TokenType::Arrow) {
+      failed += testutil::fail("operators and remaining keywords");
+    } else {
+      testutil::pass("operators and keywords");
+    }
   }
-  std::cout << "lexer_test ok\n";
-  return EXIT_SUCCESS;
+
+  {
+    try {
+      Lexer lexer("let x = 10 @ 2;");
+      (void)lexer.tokenize();
+      failed += testutil::fail("expected lexical error for '@'");
+    } catch (const tinyrjit::LexicalError& error) {
+      std::string msg = error.what();
+      if (msg.find("Unexpected character '@'") == std::string::npos || error.line() != 1) {
+        failed += testutil::fail("lexical error text");
+      } else {
+        testutil::pass("invalid character");
+      }
+    }
+  }
+
+  {
+    Lexer lexer("\"hello\"\nident");
+    auto tokens = lexer.tokenize();
+    if (tokens[0].type != TokenType::String || tokens[0].lexeme != "hello" || tokens[1].line != 2) {
+      failed += testutil::fail("string and line numbers");
+    } else {
+      testutil::pass("strings and line numbers");
+    }
+  }
+
+  if (failed == 0) {
+    std::cout << "All lexer tests passed.\n";
+  }
+  return failed == 0 ? 0 : 1;
 }

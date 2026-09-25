@@ -1,27 +1,25 @@
 #pragma once
 
-#include <cstdint>
+#include <string>
 #include <unordered_map>
-#include <vector>
 
-namespace rajit {
+namespace tinyrjit {
 
 class Profiler {
  public:
-  explicit Profiler(std::int64_t hotThreshold = 1000);
+  explicit Profiler(int hotThreshold = 1000);
 
-  void reset();
-  void hit(int loopId);
-  std::int64_t count(int loopId) const;
-  bool isHot(int loopId) const;
-  std::int64_t threshold() const { return hotThreshold_; }
-  void setThreshold(std::int64_t threshold) { hotThreshold_ = threshold; }
+  void recordFunctionCall(const std::string& name);
+  int getCallCount(const std::string& name) const;
+  bool isHot(const std::string& name) const;
+  int hotThreshold() const { return hotThreshold_; }
+  const std::unordered_map<std::string, int>& counts() const { return counts_; }
 
-  const std::unordered_map<int, std::int64_t>& counts() const { return counts_; }
+  std::string dump() const;
 
  private:
-  std::int64_t hotThreshold_;
-  std::unordered_map<int, std::int64_t> counts_;
+  int hotThreshold_;
+  std::unordered_map<std::string, int> counts_;
 };
 
-}  // namespace rajit
+}  // namespace tinyrjit

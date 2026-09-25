@@ -1,9 +1,79 @@
 #include "Lexer.h"
 
+#include "Error.h"
+
 #include <cctype>
 #include <unordered_map>
 
-namespace rajit {
+namespace tinyrjit {
+
+const char* tokenTypeName(TokenType type) {
+  switch (type) {
+    case TokenType::Fn:
+      return "FN";
+    case TokenType::Let:
+      return "LET";
+    case TokenType::If:
+      return "IF";
+    case TokenType::Else:
+      return "ELSE";
+    case TokenType::While:
+      return "WHILE";
+    case TokenType::Return:
+      return "RETURN";
+    case TokenType::Int:
+      return "INT";
+    case TokenType::Handle:
+      return "HANDLE";
+    case TokenType::Identifier:
+      return "IDENTIFIER";
+    case TokenType::Number:
+      return "NUMBER";
+    case TokenType::String:
+      return "STRING";
+    case TokenType::Plus:
+      return "PLUS";
+    case TokenType::Minus:
+      return "MINUS";
+    case TokenType::Star:
+      return "STAR";
+    case TokenType::Slash:
+      return "SLASH";
+    case TokenType::Equal:
+      return "ASSIGN";
+    case TokenType::EqualEqual:
+      return "EQUAL_EQUAL";
+    case TokenType::Less:
+      return "LESS";
+    case TokenType::Greater:
+      return "GREATER";
+    case TokenType::LessEqual:
+      return "LESS_EQUAL";
+    case TokenType::GreaterEqual:
+      return "GREATER_EQUAL";
+    case TokenType::Arrow:
+      return "ARROW";
+    case TokenType::LeftParen:
+      return "LEFT_PAREN";
+    case TokenType::RightParen:
+      return "RIGHT_PAREN";
+    case TokenType::LeftBrace:
+      return "LEFT_BRACE";
+    case TokenType::RightBrace:
+      return "RIGHT_BRACE";
+    case TokenType::Colon:
+      return "COLON";
+    case TokenType::Comma:
+      return "COMMA";
+    case TokenType::Semicolon:
+      return "SEMICOLON";
+    case TokenType::EndOfFile:
+      return "EOF";
+    case TokenType::Unknown:
+      return "UNKNOWN";
+  }
+  return "UNKNOWN";
+}
 
 Lexer::Lexer(std::string source) : source_(std::move(source)) {}
 
@@ -11,6 +81,9 @@ std::vector<Token> Lexer::tokenize() {
   std::vector<Token> tokens;
   for (;;) {
     Token token = nextToken();
+    if (token.type == TokenType::Unknown) {
+      throw LexicalError(token.line, "Unexpected character '" + token.lexeme + "'");
+    }
     tokens.push_back(token);
     if (token.type == TokenType::EndOfFile) {
       break;
@@ -34,9 +107,6 @@ char Lexer::advance() {
   char c = source_[current_++];
   if (c == '\n') {
     line_++;
-    column_ = 1;
-  } else {
-    column_++;
   }
   return c;
 }
@@ -56,6 +126,7 @@ void Lexer::skipWhitespaceAndComments() {
       advance();
       continue;
     }
+    // Optional line comments keep example files readable.
     if (c == '#') {
       while (!isAtEnd() && peek() != '\n') {
         advance();
@@ -63,6 +134,8 @@ void Lexer::skipWhitespaceAndComments() {
       continue;
     }
     if (c == '/' && peekNext() == '/') {
+      advance();
+      advance();
       while (!isAtEnd() && peek() != '\n') {
         advance();
       }
@@ -77,9 +150,8 @@ Token Lexer::makeToken(TokenType type) const {
   token.type = type;
   token.lexeme = source_.substr(start_, current_ - start_);
   token.line = line_;
-  token.column = startColumn_;
   if (!token.lexeme.empty() && token.lexeme.back() == '\n') {
-    // line_ already advanced; keep column as recorded at start
+    token.line -= 1;
   }
   return token;
 }
@@ -91,15 +163,9 @@ TokenType Lexer::keywordType(const std::string& text) const {
       {"if", TokenType::If},
       {"else", TokenType::Else},
       {"while", TokenType::While},
-      {"print", TokenType::Print},
       {"return", TokenType::Return},
-      {"acquire", TokenType::Acquire},
-      {"release", TokenType::Release},
-      {"file", TokenType::File},
-      {"mem", TokenType::Mem},
-      {"lock", TokenType::Lock},
-      {"true", TokenType::True},
-      {"false", TokenType::False},
+      {"Int", TokenType::Int},
+      {"Handle", TokenType::Handle},
   };
   auto it = keywords.find(text);
   return it == keywords.end() ? TokenType::Identifier : it->second;
@@ -109,8 +175,7 @@ Token Lexer::identifier() {
   while (std::isalnum(static_cast<unsigned char>(peek())) || peek() == '_') {
     advance();
   }
-  std::string text = source_.substr(start_, current_ - start_);
-  return makeToken(keywordType(text));
+  return makeToken(keywordType(source_.substr(start_, current_ - start_)));
 }
 
 Token Lexer::number() {
@@ -121,13 +186,13 @@ Token Lexer::number() {
 }
 
 Token Lexer::stringLiteral() {
-  while (!isAtEnd() && peek() != '"') {
+  while (!isAtEnd() && peek() != '"' && peek() != '\n') {
     advance();
   }
-  if (isAtEnd()) {
-    return makeToken(TokenType::Unknown);
+  if (isAtEnd() || peek() != '"') {
+    throw LexicalError(line_, "Unterminated string literal");
   }
-  advance();  // closing quote
+  advance();
   Token token = makeToken(TokenType::String);
   if (token.lexeme.size() >= 2) {
     token.lexeme = token.lexeme.substr(1, token.lexeme.size() - 2);
@@ -138,12 +203,11 @@ Token Lexer::stringLiteral() {
 Token Lexer::nextToken() {
   skipWhitespaceAndComments();
   start_ = current_;
-  startColumn_ = column_;
   if (isAtEnd()) {
     Token eof;
     eof.type = TokenType::EndOfFile;
+    eof.lexeme = "";
     eof.line = line_;
-    eof.column = column_;
     return eof;
   }
 
@@ -164,6 +228,8 @@ Token Lexer::nextToken() {
       return makeToken(TokenType::LeftBrace);
     case '}':
       return makeToken(TokenType::RightBrace);
+    case ':':
+      return makeToken(TokenType::Colon);
     case ',':
       return makeToken(TokenType::Comma);
     case ';':
@@ -171,19 +237,15 @@ Token Lexer::nextToken() {
     case '+':
       return makeToken(TokenType::Plus);
     case '-':
-      return makeToken(TokenType::Minus);
+      return makeToken(match('>') ? TokenType::Arrow : TokenType::Minus);
     case '*':
       return makeToken(TokenType::Star);
     case '/':
       return makeToken(TokenType::Slash);
-    case '%':
-      return makeToken(TokenType::Percent);
     case '"':
       return stringLiteral();
     case '=':
       return makeToken(match('=') ? TokenType::EqualEqual : TokenType::Equal);
-    case '!':
-      return makeToken(match('=') ? TokenType::BangEqual : TokenType::Unknown);
     case '<':
       return makeToken(match('=') ? TokenType::LessEqual : TokenType::Less);
     case '>':
@@ -193,4 +255,4 @@ Token Lexer::nextToken() {
   }
 }
 
-}  // namespace rajit
+}  // namespace tinyrjit

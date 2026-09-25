@@ -1,39 +1,50 @@
 #pragma once
 
 #include "AST.h"
-#include "SymbolTable.h"
 
-#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
-namespace rajit {
+namespace tinyrjit {
 
-class CheckError : public std::runtime_error {
- public:
-  int line;
-  CheckError(int line, const std::string& message)
-      : std::runtime_error(message), line(line) {}
+enum class ResourceState { UNOPENED, OPEN, CLOSED };
+
+inline const char* resourceStateName(ResourceState state) {
+  switch (state) {
+    case ResourceState::UNOPENED:
+      return "UNOPENED";
+    case ResourceState::OPEN:
+      return "OPEN";
+    case ResourceState::CLOSED:
+      return "CLOSED";
+  }
+  return "?";
+}
+
+struct ResourceTrace {
+  std::string handle;
+  ResourceState state;
 };
 
-enum class ResourceState { Unheld, Held };
-
+// Compile-time Handle protocol: UNOPENED -> open -> OPEN -> close -> CLOSED.
 class ResourceChecker {
  public:
   void check(const Program& program);
 
+  const std::vector<ResourceTrace>& trace() const { return trace_; }
+  bool functionUsesHandles(const std::string& name) const;
+
  private:
-  using ResourceEnv = std::unordered_map<std::string, ResourceState>;
+  std::vector<ResourceTrace> trace_;
+  std::unordered_map<std::string, bool> usesHandles_;
 
-  SymbolTable symbols_;
-  std::unordered_map<std::string, FunctionStmt*> functions_;
-
-  void checkFunction(const FunctionStmt& fn);
-  void checkStmt(const Stmt& stmt, ResourceEnv& env);
-  TypeTag checkExpr(const Expr& expr);
-  ResourceEnv merge(const ResourceEnv& a, const ResourceEnv& b, int line) const;
-  static ResourceEnv snapshot(const ResourceEnv& env);
+  void checkFunction(const FunctionDecl& fn);
+  void checkStmts(const std::vector<std::unique_ptr<Stmt>>& stmts,
+                  std::unordered_map<std::string, ResourceState>& state,
+                  bool& alwaysReturns);
+  void applyCall(const CallExpr& call, std::unordered_map<std::string, ResourceState>& state);
+  static std::string handleName(const Expr& expr);
 };
 
-}  // namespace rajit
+}  // namespace tinyrjit

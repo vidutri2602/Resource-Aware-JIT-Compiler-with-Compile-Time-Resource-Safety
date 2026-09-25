@@ -2,202 +2,118 @@
 
 #include <sstream>
 
-namespace rajit {
-
-std::string resourceKindName(ResourceKind kind) {
-  switch (kind) {
-    case ResourceKind::File:
-      return "file";
-    case ResourceKind::Mem:
-      return "mem";
-    case ResourceKind::Lock:
-      return "lock";
-  }
-  return "resource";
-}
-
-std::string binaryOpName(BinaryOp op) {
-  switch (op) {
-    case BinaryOp::Add:
-      return "+";
-    case BinaryOp::Sub:
-      return "-";
-    case BinaryOp::Mul:
-      return "*";
-    case BinaryOp::Div:
-      return "/";
-    case BinaryOp::Mod:
-      return "%";
-    case BinaryOp::Eq:
-      return "==";
-    case BinaryOp::Ne:
-      return "!=";
-    case BinaryOp::Lt:
-      return "<";
-    case BinaryOp::Le:
-      return "<=";
-    case BinaryOp::Gt:
-      return ">";
-    case BinaryOp::Ge:
-      return ">=";
-  }
-  return "?";
-}
-
-std::string unaryOpName(UnaryOp op) {
-  return op == UnaryOp::Negate ? "-" : "!";
-}
-
+namespace tinyrjit {
 namespace {
 
-void indent(std::ostream& out, int depth) { out << std::string(depth * 2, ' '); }
-
-void dumpExpr(const Expr& expr, std::ostream& out, int depth);
-void dumpStmt(const Stmt& stmt, std::ostream& out, int depth);
-
-void dumpExpr(const Expr& expr, std::ostream& out, int depth) {
-  indent(out, depth);
-  switch (expr.kind) {
-    case ExprKind::Literal: {
-      const auto& lit = static_cast<const LiteralExpr&>(expr);
-      out << "Literal ";
-      if (lit.literalKind == LiteralKind::Integer) {
-        out << lit.intValue;
-      } else if (lit.literalKind == LiteralKind::Boolean) {
-        out << (lit.boolValue ? "true" : "false");
-      } else {
-        out << '"' << lit.stringValue << '"';
-      }
-      out << "\n";
-      break;
-    }
-    case ExprKind::Variable: {
-      const auto& var = static_cast<const VariableExpr&>(expr);
-      out << "Var " << var.name << "\n";
-      break;
-    }
-    case ExprKind::Unary: {
-      const auto& un = static_cast<const UnaryExpr&>(expr);
-      out << "Unary " << unaryOpName(un.op) << "\n";
-      dumpExpr(*un.operand, out, depth + 1);
-      break;
-    }
-    case ExprKind::Binary: {
-      const auto& bin = static_cast<const BinaryExpr&>(expr);
-      out << "Binary " << binaryOpName(bin.op) << "\n";
-      dumpExpr(*bin.left, out, depth + 1);
-      dumpExpr(*bin.right, out, depth + 1);
-      break;
-    }
-    case ExprKind::Call: {
-      const auto& call = static_cast<const CallExpr&>(expr);
-      out << "Call " << call.callee << "\n";
-      for (const auto& arg : call.args) {
-        dumpExpr(*arg, out, depth + 1);
-      }
-      break;
-    }
-  }
-}
-
-void dumpStmt(const Stmt& stmt, std::ostream& out, int depth) {
-  indent(out, depth);
-  switch (stmt.kind) {
-    case StmtKind::Let: {
-      const auto& s = static_cast<const LetStmt&>(stmt);
-      out << "Let " << s.name << "\n";
-      dumpExpr(*s.initializer, out, depth + 1);
-      break;
-    }
-    case StmtKind::Assign: {
-      const auto& s = static_cast<const AssignStmt&>(stmt);
-      out << "Assign " << s.name << "\n";
-      dumpExpr(*s.value, out, depth + 1);
-      break;
-    }
-    case StmtKind::Expr: {
-      const auto& s = static_cast<const ExprStmt&>(stmt);
-      out << "ExprStmt\n";
-      dumpExpr(*s.expr, out, depth + 1);
-      break;
-    }
-    case StmtKind::Print: {
-      const auto& s = static_cast<const PrintStmt&>(stmt);
-      out << "Print\n";
-      dumpExpr(*s.expr, out, depth + 1);
-      break;
-    }
-    case StmtKind::Return: {
-      const auto& s = static_cast<const ReturnStmt&>(stmt);
-      out << "Return\n";
-      if (s.value) {
-        dumpExpr(*s.value, out, depth + 1);
-      }
-      break;
-    }
-    case StmtKind::If: {
-      const auto& s = static_cast<const IfStmt&>(stmt);
-      out << "If\n";
-      dumpExpr(*s.condition, out, depth + 1);
-      dumpStmt(*s.thenBranch, out, depth + 1);
-      if (s.elseBranch) {
-        dumpStmt(*s.elseBranch, out, depth + 1);
-      }
-      break;
-    }
-    case StmtKind::While: {
-      const auto& s = static_cast<const WhileStmt&>(stmt);
-      out << "While id=" << s.loopId << "\n";
-      dumpExpr(*s.condition, out, depth + 1);
-      dumpStmt(*s.body, out, depth + 1);
-      break;
-    }
-    case StmtKind::Block: {
-      const auto& s = static_cast<const BlockStmt&>(stmt);
-      out << "Block\n";
-      for (const auto& inner : s.statements) {
-        dumpStmt(*inner, out, depth + 1);
-      }
-      break;
-    }
-    case StmtKind::Acquire: {
-      const auto& s = static_cast<const AcquireStmt&>(stmt);
-      out << "Acquire " << resourceKindName(s.resourceKind) << " " << s.name << "\n";
-      if (s.argument) {
-        dumpExpr(*s.argument, out, depth + 1);
-      }
-      break;
-    }
-    case StmtKind::Release: {
-      const auto& s = static_cast<const ReleaseStmt&>(stmt);
-      out << "Release " << s.name << "\n";
-      break;
-    }
-    case StmtKind::Function: {
-      const auto& s = static_cast<const FunctionStmt&>(stmt);
-      out << "Fn " << s.name << "(";
-      for (std::size_t i = 0; i < s.params.size(); ++i) {
-        if (i) {
-          out << ", ";
-        }
-        out << s.params[i];
-      }
-      out << ")\n";
-      dumpStmt(*s.body, out, depth + 1);
-      break;
-    }
+std::string opText(TokenType op) {
+  switch (op) {
+    case TokenType::Plus:
+      return "+";
+    case TokenType::Minus:
+      return "-";
+    case TokenType::Star:
+      return "*";
+    case TokenType::Slash:
+      return "/";
+    case TokenType::EqualEqual:
+      return "==";
+    case TokenType::Less:
+      return "<";
+    case TokenType::Greater:
+      return ">";
+    case TokenType::LessEqual:
+      return "<=";
+    case TokenType::GreaterEqual:
+      return ">=";
+    default:
+      return "?";
   }
 }
 
 }  // namespace
 
-std::string dumpAst(const Program& program) {
+std::string dumpExpr(const Expr& expr, const std::string& indent) {
   std::ostringstream out;
-  out << "Program\n";
-  for (const auto& fn : program.functions) {
-    dumpStmt(*fn, out, 1);
+  if (const auto* n = dynamic_cast<const NumberExpr*>(&expr)) {
+    out << indent << n->value << "\n";
+  } else if (const auto* s = dynamic_cast<const StringExpr*>(&expr)) {
+    out << indent << "\"" << s->value << "\"\n";
+  } else if (const auto* v = dynamic_cast<const VariableExpr*>(&expr)) {
+    out << indent << v->name << "\n";
+  } else if (const auto* b = dynamic_cast<const BinaryExpr*>(&expr)) {
+    out << indent << "BinaryExpression: " << opText(b->op) << "\n";
+    out << dumpExpr(*b->left, indent + "    ");
+    out << dumpExpr(*b->right, indent + "    ");
+  } else if (const auto* c = dynamic_cast<const CallExpr*>(&expr)) {
+    out << indent << "CallExpression: " << c->callee << "\n";
+    for (const auto& arg : c->args) {
+      out << dumpExpr(*arg, indent + "    ");
+    }
   }
   return out.str();
 }
 
-}  // namespace rajit
+std::string dumpStmt(const Stmt& stmt, const std::string& indent) {
+  std::ostringstream out;
+  if (const auto* d = dynamic_cast<const VariableDeclStmt*>(&stmt)) {
+    out << indent << "VariableDeclaration\n";
+    out << indent << "├── Name: " << d->name << "\n";
+    out << indent << "├── Type: " << typeName(d->type) << "\n";
+    out << indent << "└── ";
+    std::string initDump = dumpExpr(*d->init, indent + "    ");
+    // Put the first line of the initializer on the same line as └──.
+    if (!initDump.empty() && initDump.compare(0, (indent + "    ").size(), indent + "    ") == 0) {
+      out << initDump.substr((indent + "    ").size());
+    } else {
+      out << "\n" << initDump;
+    }
+  } else if (const auto* a = dynamic_cast<const AssignmentStmt*>(&stmt)) {
+    out << indent << "Assignment: " << a->name << "\n";
+    out << dumpExpr(*a->value, indent + "    ");
+  } else if (const auto* e = dynamic_cast<const ExpressionStmt*>(&stmt)) {
+    out << indent << "ExpressionStatement\n";
+    out << dumpExpr(*e->expr, indent + "    ");
+  } else if (const auto* r = dynamic_cast<const ReturnStmt*>(&stmt)) {
+    out << indent << "Return\n";
+    out << dumpExpr(*r->value, indent + "    ");
+  } else if (const auto* i = dynamic_cast<const IfStmt*>(&stmt)) {
+    out << indent << "If\n";
+    out << indent << "├── Condition\n";
+    out << dumpExpr(*i->condition, indent + "│   ");
+    out << indent << "├── Then\n";
+    for (const auto& s : i->thenBranch) {
+      out << dumpStmt(*s, indent + "│   ");
+    }
+    out << indent << "└── Else\n";
+    for (const auto& s : i->elseBranch) {
+      out << dumpStmt(*s, indent + "    ");
+    }
+  } else if (const auto* w = dynamic_cast<const WhileStmt*>(&stmt)) {
+    out << indent << "While\n";
+    out << indent << "├── Condition\n";
+    out << dumpExpr(*w->condition, indent + "│   ");
+    out << indent << "└── Body\n";
+    for (const auto& s : w->body) {
+      out << dumpStmt(*s, indent + "    ");
+    }
+  }
+  return out.str();
+}
+
+std::string dumpAst(const Program& program) {
+  std::ostringstream out;
+  for (const auto& fn : program.functions) {
+    out << "Function: " << fn->name << " -> " << typeName(fn->returnType) << "\n";
+    for (const auto& p : fn->params) {
+      out << "  Param: " << p.name << ": " << typeName(p.type) << "\n";
+    }
+    out << "  Body:\n";
+    for (const auto& stmt : fn->body) {
+      out << dumpStmt(*stmt, "    ");
+    }
+    out << "\n";
+  }
+  return out.str();
+}
+
+}  // namespace tinyrjit

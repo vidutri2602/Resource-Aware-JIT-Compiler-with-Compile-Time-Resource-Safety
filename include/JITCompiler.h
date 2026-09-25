@@ -1,40 +1,33 @@
 #pragma once
 
 #include "AST.h"
-#include "CodeGenerator.h"
-#include "Profiler.h"
 
 #include <cstdint>
-#include <iosfwd>
+#include <memory>
 #include <string>
-#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
-namespace rajit {
+namespace tinyrjit {
 
 class JITCompiler {
  public:
-  explicit JITCompiler(Profiler& profiler);
+  JITCompiler();
+  ~JITCompiler();
 
-  void setEnabled(bool enabled) { enabled_ = enabled; }
-  bool enabled() const { return enabled_; }
+  JITCompiler(const JITCompiler&) = delete;
+  JITCompiler& operator=(const JITCompiler&) = delete;
 
-  bool maybeCompile(const WhileStmt& loop, const std::vector<std::string>& locals);
-  bool has(int loopId) const;
-  // Runs compiled loop; reads/writes integer locals in `env`.
-  bool run(int loopId, std::unordered_map<std::string, std::int64_t>& env,
-           std::ostream& output);
-
-  const Chunk* chunk(int loopId) const;
+  void compile(const Program& program, const std::unordered_set<std::string>& eligible);
+  const std::string& ir() const { return ir_; }
+  bool hasCompiled(const std::string& name) const;
+  std::int32_t invoke(const std::string& name, const std::vector<std::int32_t>& args);
 
  private:
-  Profiler& profiler_;
-  bool enabled_ = true;
-  std::unordered_map<int, Chunk> compiled_;
-  CodeGenerator generator_;
-
-  bool execute(const Chunk& chunk, std::unordered_map<std::string, std::int64_t>& env,
-               std::ostream& output) const;
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+  std::string ir_;
+  std::unordered_set<std::string> compiled_;
 };
 
-}  // namespace rajit
+}  // namespace tinyrjit

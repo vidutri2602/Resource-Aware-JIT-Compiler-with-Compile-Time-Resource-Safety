@@ -1,113 +1,89 @@
-#include "Lexer.h"
-#include "Parser.h"
+#include "Error.h"
 #include "ResourceChecker.h"
+#include "test_support.h"
 
-#include <cstdlib>
 #include <iostream>
-#include <string>
 
-static int failures = 0;
+static const char* kValid =
+    "fn main() -> Int {\n"
+    "  let h: Handle = open(\"data.txt\");\n"
+    "  use(h);\n"
+    "  close(h);\n"
+    "  return 0;\n"
+    "}\n";
 
-static void expect(bool cond, const std::string& message) {
-  if (!cond) {
-    std::cerr << "FAIL: " << message << "\n";
-    failures++;
-  }
-}
-
-static rajit::Program parse(const std::string& source) {
-  rajit::Lexer lexer(source);
-  rajit::Parser parser(lexer.tokenize());
-  return parser.parse();
-}
-
-static bool checkOk(const std::string& source) {
-  auto program = parse(source);
-  rajit::ResourceChecker checker;
-  checker.check(program);
-  return true;
-}
-
-static bool checkFails(const std::string& source) {
+static bool expectResource(const std::string& source, const std::string& needle) {
   try {
-    auto program = parse(source);
-    rajit::ResourceChecker checker;
-    checker.check(program);
+    tinyrjit::ResourceChecker checker;
+    (void)testutil::analyze(source, &checker);
+    std::cerr << "FAIL: expected resource error containing: " << needle << "\n";
     return false;
-  } catch (const rajit::CheckError&) {
+  } catch (const tinyrjit::ResourceError& error) {
+    std::string msg = error.what();
+    if (msg.find(needle) == std::string::npos) {
+      std::cerr << "FAIL: resource message mismatch\n" << msg << "\n";
+      return false;
+    }
     return true;
   }
 }
 
 int main() {
-  expect(checkOk(R"(
-    fn main() {
-      let f = acquire file "a.txt";
-      release f;
-    }
-  )"),
-         "balanced acquire/release");
+  int failed = 0;
 
-  expect(checkFails(R"(
-    fn main() {
-      let f = acquire file "a.txt";
-    }
-  )"),
-         "leak is rejected");
-
-  expect(checkFails(R"(
-    fn main() {
-      let f = acquire file "a.txt";
-      release f;
-      release f;
-    }
-  )"),
-         "double release is rejected");
-
-  expect(checkFails(R"(
-    fn main() {
-      let x = 1;
-      if (x) { let f = acquire file "a.txt"; } else { print 0; }
-    }
-  )"),
-         "held on one branch only");
-
-  expect(checkOk(R"(
-    fn main() {
-      let x = 1;
-      let f = acquire file "a.txt";
-      if (x) { release f; } else { release f; }
-    }
-  )"),
-         "release on both branches");
-
-  expect(checkFails(R"(
-    fn main() {
-      let i = 0;
-      while (i < 3) {
-        let f = acquire file "a.txt";
-        i = i + 1;
+  {
+    tinyrjit::ResourceChecker checker;
+    try {
+      (void)testutil::analyze(kValid, &checker);
+      if (checker.trace().size() < 4) {
+        failed += testutil::fail("valid handle trace too short");
+      } else {
+        testutil::pass("valid Handle");
       }
+    } catch (const std::exception& error) {
+      failed += testutil::fail(std::string("valid Handle threw: ") + error.what());
     }
-  )"),
-         "acquire in loop without matching release");
-
-  expect(checkOk(R"(
-    fn main() {
-      let i = 0;
-      while (i < 3) {
-        let f = acquire file "a.txt";
-        release f;
-        i = i + 1;
-      }
-    }
-  )"),
-         "acquire+release in same iteration");
-
-  if (failures) {
-    std::cerr << failures << " resource tests failed\n";
-    return EXIT_FAILURE;
   }
-  std::cout << "resource_test ok\n";
-  return EXIT_SUCCESS;
+
+  if (!expectResource(
+          "fn main() -> Int { let h: Handle = open(\"data.txt\"); close(h); close(h); return 0; }\n",
+          "already closed")) {
+    failed++;
+  } else {
+    testutil::pass("double close");
+  }
+
+  if (!expectResource(
+          "fn main() -> Int { let h: Handle = open(\"data.txt\"); close(h); use(h); return 0; }\n",
+          "Cannot use closed Handle")) {
+    failed++;
+  } else {
+    testutil::pass("use after close");
+  }
+
+  if (!expectResource(
+          "fn main() -> Int {\n"
+          "  let src: Handle = open(\"data.txt\");\n"
+          "  close(src);\n"
+          "  let h: Handle = src;\n"
+          "  use(h);\n"
+          "  return 0;\n"
+          "}\n",
+          "has not been opened")) {
+    failed++;
+  } else {
+    testutil::pass("use before open");
+  }
+
+  if (!expectResource("fn main() -> Int { let h: Handle = open(\"data.txt\"); return 0; }\n",
+                      "remains open")) {
+    failed++;
+  } else {
+    testutil::pass("unclosed Handle");
+  }
+
+  if (failed == 0) {
+    std::cout << "All resource tests passed.\n";
+  }
+  return failed == 0 ? 0 : 1;
 }

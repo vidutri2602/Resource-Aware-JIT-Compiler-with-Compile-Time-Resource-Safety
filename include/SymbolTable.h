@@ -6,29 +6,40 @@
 #include <unordered_map>
 #include <vector>
 
-namespace rajit {
+namespace tinyrjit {
 
-enum class TypeTag { Int, Bool, String, Resource, Function, Unknown };
+enum class SymbolKind { Variable, Function };
 
 struct Symbol {
   std::string name;
-  TypeTag type = TypeTag::Unknown;
-  ResourceKind resourceKind = ResourceKind::File;
-  bool isResource = false;
-  int line = 1;
+  TypeKind type = TypeKind::Int;
+  SymbolKind kind = SymbolKind::Variable;
+  std::string scope;
+  std::vector<TypeKind> paramTypes;
+  int line = 0;
 };
 
+// Nested lexical scopes used by semantic analysis.
 class SymbolTable {
  public:
-  void pushScope();
-  void popScope();
-  bool declare(const Symbol& symbol);
-  Symbol* resolve(const std::string& name);
-  const Symbol* resolve(const std::string& name) const;
-  int depth() const { return static_cast<int>(scopes_.size()); }
+  void enterScope(const std::string& name);
+  void exitScope();
+  const std::string& currentScope() const;
+
+  void insert(const Symbol& symbol);
+  const Symbol* lookup(const std::string& name) const;
+  bool exists(const std::string& name) const;
+  bool existsInCurrentScope(const std::string& name) const;
+
+  std::vector<Symbol> allSymbols() const;
 
  private:
-  std::vector<std::unordered_map<std::string, Symbol>> scopes_;
+  struct Scope {
+    std::string name;
+    std::unordered_map<std::string, Symbol> symbols;
+  };
+
+  std::vector<Scope> scopes_;
 };
 
-}  // namespace rajit
+}  // namespace tinyrjit

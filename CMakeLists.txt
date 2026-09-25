@@ -5,38 +5,87 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-if(MSVC)
-  add_compile_options(/W4 /permissive-)
-else()
-  add_compile_options(-Wall -Wextra -Wpedantic)
+# Expected LLVM: 14–21 (ORC LLJIT + IRBuilder). Discovery uses LLVMConfig.cmake
+# from a standard LLVM install (no hardcoded paths).
+find_package(LLVM REQUIRED CONFIG)
+message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
+message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
+
+include_directories(${LLVM_INCLUDE_DIRS})
+separate_arguments(LLVM_DEFINITIONS_LIST NATIVE_COMMAND ${LLVM_DEFINITIONS})
+add_definitions(${LLVM_DEFINITIONS_LIST})
+
+if(NOT DEFINED LLVM_ENABLE_RTTI)
+  set(LLVM_ENABLE_RTTI ON)
 endif()
 
-add_library(rajit_lib
+set(RAJIT_CORE
   src/Lexer.cpp
-  src/Parser.cpp
   src/AST.cpp
+  src/Parser.cpp
   src/SymbolTable.cpp
+  src/SemanticAnalyzer.cpp
   src/ResourceChecker.cpp
   src/Interpreter.cpp
   src/Profiler.cpp
-  src/JITCompiler.cpp
-  src/CodeGenerator.cpp
+  src/JITPolicy.cpp
 )
 
-target_include_directories(rajit_lib PUBLIC include)
+add_library(rajit_core STATIC ${RAJIT_CORE})
+target_include_directories(rajit_core PUBLIC include)
 
-add_executable(rajit src/main.cpp)
-target_link_libraries(rajit PRIVATE rajit_lib)
+add_executable(resourcejit
+  src/main.cpp
+  src/CodeGenerator.cpp
+  src/JITCompiler.cpp
+)
+target_include_directories(resourcejit PRIVATE include ${LLVM_INCLUDE_DIRS})
+target_link_libraries(resourcejit PRIVATE rajit_core)
+
+if(LLVM_LINK_LLVM_DYLIB)
+  target_link_libraries(resourcejit PRIVATE LLVM)
+else()
+  llvm_map_components_to_libnames(LLVM_LIBS
+    Core
+    Support
+    native
+    orcjit
+    ExecutionEngine
+    MC
+    MCJIT
+    Target
+    TransformUtils
+    Analysis
+  )
+  target_link_libraries(resourcejit PRIVATE ${LLVM_LIBS})
+endif()
+
+if(NOT LLVM_ENABLE_RTTI)
+  message(STATUS
+    "LLVM was built without RTTI. TinyRAJIT keeps RTTI for AST dynamic_cast; "
+    "this is the usual setup when linking the LLVM shared library.")
+endif()
+
+if(MSVC)
+  target_compile_options(rajit_core PRIVATE /W4 /permissive-)
+  target_compile_options(resourcejit PRIVATE /W4 /permissive-)
+else()
+  target_compile_options(rajit_core PRIVATE -Wall -Wextra -Wpedantic)
+  target_compile_options(resourcejit PRIVATE -Wall -Wextra -Wpedantic)
+endif()
 
 enable_testing()
 
-function(rajit_test name)
+function(add_rajit_test name)
   add_executable(${name} tests/${name}.cpp)
-  target_link_libraries(${name} PRIVATE rajit_lib)
+  target_include_directories(${name} PRIVATE include ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(${name} PRIVATE rajit_core)
   add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
-rajit_test(lexer_test)
-rajit_test(parser_test)
-rajit_test(resource_test)
-rajit_test(jit_test)
+add_rajit_test(lexer_test)
+add_rajit_test(parser_test)
+add_rajit_test(semantic_test)
+add_rajit_test(resource_test)
+add_rajit_test(interpreter_test)
+add_rajit_test(profiler_test)

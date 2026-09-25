@@ -1,294 +1,229 @@
 #include "ResourceChecker.h"
 
-#include <algorithm>
-#include <vector>
+#include "Error.h"
 
-namespace rajit {
+#include <set>
 
-namespace {
+namespace tinyrjit {
 
-CheckError err(int line, const std::string& message) {
-  return CheckError(line, "resource error at line " + std::to_string(line) + ": " + message);
+bool ResourceChecker::functionUsesHandles(const std::string& name) const {
+  auto it = usesHandles_.find(name);
+  return it != usesHandles_.end() && it->second;
 }
 
-}  // namespace
+std::string ResourceChecker::handleName(const Expr& expr) {
+  if (const auto* v = dynamic_cast<const VariableExpr*>(&expr)) {
+    return v->name;
+  }
+  return "";
+}
 
 void ResourceChecker::check(const Program& program) {
-  symbols_.pushScope();
-  functions_.clear();
-  for (const auto& fn : program.functions) {
-    Symbol sym;
-    sym.name = fn->name;
-    sym.type = TypeTag::Function;
-    sym.line = fn->line;
-    if (!symbols_.declare(sym)) {
-      throw err(fn->line, "duplicate function '" + fn->name + "'");
-    }
-    functions_[fn->name] = fn.get();
-  }
-  if (!functions_.count("main")) {
-    throw err(1, "program must define fn main()");
-  }
+  trace_.clear();
+  usesHandles_.clear();
   for (const auto& fn : program.functions) {
     checkFunction(*fn);
   }
 }
 
-void ResourceChecker::checkFunction(const FunctionStmt& fn) {
-  symbols_.pushScope();
-  ResourceEnv env;
-  for (const auto& param : fn.params) {
-    Symbol sym;
-    sym.name = param;
-    sym.type = TypeTag::Int;
-    sym.line = fn.line;
-    if (!symbols_.declare(sym)) {
-      throw err(fn.line, "duplicate parameter '" + param + "'");
-    }
+void ResourceChecker::applyCall(const CallExpr& call,
+                                std::unordered_map<std::string, ResourceState>& state) {
+  if (call.callee != "use" && call.callee != "close") {
+    return;
   }
-  checkStmt(*fn.body, env);
-  for (const auto& [name, state] : env) {
-    if (state == ResourceState::Held) {
-      throw err(fn.line, "resource '" + name + "' is still held at end of '" + fn.name + "'");
-    }
+  if (call.args.size() != 1) {
+    return;
   }
-  symbols_.popScope();
+  std::string name = handleName(*call.args[0]);
+  if (name.empty()) {
+    throw ResourceError(call.line, call.callee + "() requires a Handle variable.");
+  }
+  auto it = state.find(name);
+  if (it == state.end() || it->second == ResourceState::UNOPENED) {
+    throw ResourceError(call.line, "Handle '" + name + "' has not been opened.");
+  }
+  if (call.callee == "use") {
+    if (it->second == ResourceState::CLOSED) {
+      throw ResourceError(call.line, "Cannot use closed Handle '" + name + "'.");
+    }
+    trace_.push_back({name, ResourceState::OPEN});
+    return;
+  }
+  // close
+  if (it->second == ResourceState::CLOSED) {
+    throw ResourceError(call.line, "Handle '" + name + "' is already closed.");
+  }
+  it->second = ResourceState::CLOSED;
+  trace_.push_back({name, ResourceState::CLOSED});
 }
 
-void ResourceChecker::checkStmt(const Stmt& stmt, ResourceEnv& env) {
-  switch (stmt.kind) {
-    case StmtKind::Let: {
-      const auto& s = static_cast<const LetStmt&>(stmt);
-      TypeTag type = checkExpr(*s.initializer);
-      Symbol sym;
-      sym.name = s.name;
-      sym.type = type;
-      sym.line = s.line;
-      if (!symbols_.declare(sym)) {
-        throw err(s.line, "redeclaration of '" + s.name + "'");
-      }
+void ResourceChecker::checkStmts(const std::vector<std::unique_ptr<Stmt>>& stmts,
+                                 std::unordered_map<std::string, ResourceState>& state,
+                                 bool& alwaysReturns) {
+  alwaysReturns = false;
+  for (const auto& stmt : stmts) {
+    if (alwaysReturns) {
       break;
     }
-    case StmtKind::Assign: {
-      const auto& s = static_cast<const AssignStmt&>(stmt);
-      Symbol* existing = symbols_.resolve(s.name);
-      if (!existing) {
-        throw err(s.line, "undeclared variable '" + s.name + "'");
-      }
-      if (existing->isResource) {
-        throw err(s.line, "cannot assign to resource '" + s.name + "'");
-      }
-      TypeTag type = checkExpr(*s.value);
-      if (existing->type != TypeTag::Unknown && type != TypeTag::Unknown &&
-          existing->type != type &&
-          !(existing->type == TypeTag::Int && type == TypeTag::Bool) &&
-          !(existing->type == TypeTag::Bool && type == TypeTag::Int)) {
-        throw err(s.line, "type mismatch in assignment to '" + s.name + "'");
-      }
-      break;
-    }
-    case StmtKind::Expr: {
-      const auto& s = static_cast<const ExprStmt&>(stmt);
-      checkExpr(*s.expr);
-      break;
-    }
-    case StmtKind::Print: {
-      const auto& s = static_cast<const PrintStmt&>(stmt);
-      checkExpr(*s.expr);
-      break;
-    }
-    case StmtKind::Return: {
-      const auto& s = static_cast<const ReturnStmt&>(stmt);
-      if (s.value) {
-        checkExpr(*s.value);
-      }
-      for (const auto& [name, state] : env) {
-        if (state == ResourceState::Held) {
-          throw err(s.line, "cannot return while resource '" + name + "' is held");
+    if (auto* d = dynamic_cast<VariableDeclStmt*>(stmt.get())) {
+      if (d->type == TypeKind::Handle) {
+        auto* call = dynamic_cast<CallExpr*>(d->init.get());
+        if (call && call->callee == "open") {
+          state[d->name] = ResourceState::UNOPENED;
+          trace_.push_back({d->name, ResourceState::UNOPENED});
+          state[d->name] = ResourceState::OPEN;
+          trace_.push_back({d->name, ResourceState::OPEN});
+        } else {
+          state[d->name] = ResourceState::UNOPENED;
+          trace_.push_back({d->name, ResourceState::UNOPENED});
         }
       }
-      break;
+      continue;
     }
-    case StmtKind::If: {
-      const auto& s = static_cast<const IfStmt&>(stmt);
-      checkExpr(*s.condition);
-      ResourceEnv thenEnv = snapshot(env);
-      symbols_.pushScope();
-      checkStmt(*s.thenBranch, thenEnv);
-      symbols_.popScope();
-      ResourceEnv elseEnv = snapshot(env);
-      if (s.elseBranch) {
-        symbols_.pushScope();
-        checkStmt(*s.elseBranch, elseEnv);
-        symbols_.popScope();
+    if (auto* a = dynamic_cast<AssignmentStmt*>(stmt.get())) {
+      auto* call = dynamic_cast<CallExpr*>(a->value.get());
+      if (call && call->callee == "open") {
+        state[a->name] = ResourceState::UNOPENED;
+        trace_.push_back({a->name, ResourceState::UNOPENED});
+        state[a->name] = ResourceState::OPEN;
+        trace_.push_back({a->name, ResourceState::OPEN});
+      } else if (auto* exprStmtCall = dynamic_cast<CallExpr*>(a->value.get())) {
+        applyCall(*exprStmtCall, state);
       }
-      env = merge(thenEnv, elseEnv, s.line);
-      break;
+      continue;
     }
-    case StmtKind::While: {
-      const auto& s = static_cast<const WhileStmt&>(stmt);
-      checkExpr(*s.condition);
-      ResourceEnv before = snapshot(env);
-      ResourceEnv bodyEnv = snapshot(env);
-      symbols_.pushScope();
-      checkStmt(*s.body, bodyEnv);
-      symbols_.popScope();
+    if (auto* e = dynamic_cast<ExpressionStmt*>(stmt.get())) {
+      if (auto* call = dynamic_cast<CallExpr*>(e->expr.get())) {
+        applyCall(*call, state);
+      }
+      continue;
+    }
+    if (auto* r = dynamic_cast<ReturnStmt*>(stmt.get())) {
+      for (const auto& kv : state) {
+        if (kv.second == ResourceState::OPEN) {
+          throw ResourceError(r->line, "Handle '" + kv.first + "' remains open at function exit.");
+        }
+      }
+      alwaysReturns = true;
+      continue;
+    }
+    if (auto* i = dynamic_cast<IfStmt*>(stmt.get())) {
+      auto thenState = state;
+      auto elseState = state;
+      bool thenRet = false;
+      bool elseRet = false;
+      checkStmts(i->thenBranch, thenState, thenRet);
+      checkStmts(i->elseBranch, elseState, elseRet);
+      if (thenRet && elseRet) {
+        alwaysReturns = true;
+        state = thenState;
+        continue;
+      }
+      if (thenRet) {
+        state = elseState;
+        continue;
+      }
+      if (elseRet) {
+        state = thenState;
+        continue;
+      }
+      std::set<std::string> names;
+      for (const auto& kv : thenState) {
+        names.insert(kv.first);
+      }
+      for (const auto& kv : elseState) {
+        names.insert(kv.first);
+      }
+      for (const auto& name : names) {
+        ResourceState ts = thenState.count(name) ? thenState[name] : ResourceState::UNOPENED;
+        ResourceState es = elseState.count(name) ? elseState[name] : ResourceState::UNOPENED;
+        if (ts != es) {
+          throw ResourceError(i->line,
+                              "Handle '" + name +
+                                  "' has different states on if/else branches "
+                                  "(conservative analysis).");
+        }
+        state[name] = ts;
+      }
+      continue;
+    }
+    if (auto* w = dynamic_cast<WhileStmt*>(stmt.get())) {
+      auto bodyState = state;
+      bool bodyRet = false;
+      checkStmts(w->body, bodyState, bodyRet);
+      for (const auto& kv : state) {
+        ResourceState after = bodyState.count(kv.first) ? bodyState[kv.first] : kv.second;
+        if (after != kv.second) {
+          throw ResourceError(w->line,
+                              "Loop may change Handle '" + kv.first +
+                                  "' (conservative while-loop analysis).");
+        }
+      }
+      for (const auto& kv : bodyState) {
+        if (!state.count(kv.first)) {
+          throw ResourceError(w->line,
+                              "Loop may change Handle '" + kv.first +
+                                  "' (conservative while-loop analysis).");
+        }
+      }
+      continue;
+    }
+  }
+}
 
-      auto heldNames = [](const ResourceEnv& e) {
-        std::vector<std::string> names;
-        for (const auto& [name, state] : e) {
-          if (state == ResourceState::Held) {
-            names.push_back(name);
+void ResourceChecker::checkFunction(const FunctionDecl& fn) {
+  std::unordered_map<std::string, ResourceState> state;
+  bool uses = false;
+  for (const auto& p : fn.params) {
+    if (p.type == TypeKind::Handle) {
+      uses = true;
+      state[p.name] = ResourceState::OPEN;
+      trace_.push_back({p.name, ResourceState::OPEN});
+    }
+  }
+
+  auto markUses = [&](auto&& self, const std::vector<std::unique_ptr<Stmt>>& stmts) -> void {
+    for (const auto& stmt : stmts) {
+      if (auto* d = dynamic_cast<VariableDeclStmt*>(stmt.get())) {
+        if (d->type == TypeKind::Handle) {
+          uses = true;
+        }
+      }
+      if (auto* e = dynamic_cast<ExpressionStmt*>(stmt.get())) {
+        if (auto* call = dynamic_cast<CallExpr*>(e->expr.get())) {
+          if (call->callee == "open" || call->callee == "use" || call->callee == "close") {
+            uses = true;
           }
         }
-        std::sort(names.begin(), names.end());
-        return names;
-      };
-      if (heldNames(before) != heldNames(bodyEnv)) {
-        throw err(s.line, "loop must not change net resource holdings");
       }
-      break;
-    }
-    case StmtKind::Block: {
-      const auto& s = static_cast<const BlockStmt&>(stmt);
-      symbols_.pushScope();
-      for (const auto& inner : s.statements) {
-        checkStmt(*inner, env);
-      }
-      symbols_.popScope();
-      break;
-    }
-    case StmtKind::Acquire: {
-      const auto& s = static_cast<const AcquireStmt&>(stmt);
-      if (s.argument) {
-        checkExpr(*s.argument);
-      }
-      if (s.resourceKind == ResourceKind::File && !s.argument) {
-        throw err(s.line, "acquire file requires a path");
-      }
-      if (s.resourceKind == ResourceKind::Mem && !s.argument) {
-        throw err(s.line, "acquire mem requires a size");
-      }
-      Symbol* existing = symbols_.resolve(s.name);
-      if (existing && existing->isResource) {
-        auto it = env.find(s.name);
-        if (it != env.end() && it->second == ResourceState::Held) {
-          throw err(s.line, "acquire would leak already-held resource '" + s.name + "'");
+      if (auto* d = dynamic_cast<VariableDeclStmt*>(stmt.get())) {
+        if (auto* call = dynamic_cast<CallExpr*>(d->init.get())) {
+          if (call->callee == "open") {
+            uses = true;
+          }
         }
       }
-      Symbol sym;
-      sym.name = s.name;
-      sym.type = TypeTag::Resource;
-      sym.isResource = true;
-      sym.resourceKind = s.resourceKind;
-      sym.line = s.line;
-      if (!existing) {
-        if (!symbols_.declare(sym)) {
-          throw err(s.line, "redeclaration of '" + s.name + "'");
-        }
-      } else if (!existing->isResource) {
-        throw err(s.line, "'" + s.name + "' is not a resource");
+      if (auto* i = dynamic_cast<IfStmt*>(stmt.get())) {
+        self(self, i->thenBranch);
+        self(self, i->elseBranch);
       }
-      env[s.name] = ResourceState::Held;
-      break;
+      if (auto* w = dynamic_cast<WhileStmt*>(stmt.get())) {
+        self(self, w->body);
+      }
     }
-    case StmtKind::Release: {
-      const auto& s = static_cast<const ReleaseStmt&>(stmt);
-      Symbol* existing = symbols_.resolve(s.name);
-      if (!existing || !existing->isResource) {
-        throw err(s.line, "release of unknown resource '" + s.name + "'");
+  };
+  markUses(markUses, fn.body);
+  usesHandles_[fn.name] = uses;
+
+  bool alwaysReturns = false;
+  checkStmts(fn.body, state, alwaysReturns);
+  if (!alwaysReturns) {
+    for (const auto& kv : state) {
+      if (kv.second == ResourceState::OPEN) {
+        throw ResourceError(fn.line, "Handle '" + kv.first + "' remains open at function exit.");
       }
-      auto it = env.find(s.name);
-      if (it == env.end() || it->second != ResourceState::Held) {
-        throw err(s.line, "double release or release of unheld resource '" + s.name + "'");
-      }
-      it->second = ResourceState::Unheld;
-      break;
     }
-    case StmtKind::Function:
-      break;
   }
 }
 
-TypeTag ResourceChecker::checkExpr(const Expr& expr) {
-  switch (expr.kind) {
-    case ExprKind::Literal: {
-      const auto& lit = static_cast<const LiteralExpr&>(expr);
-      if (lit.literalKind == LiteralKind::Integer) {
-        return TypeTag::Int;
-      }
-      if (lit.literalKind == LiteralKind::Boolean) {
-        return TypeTag::Bool;
-      }
-      return TypeTag::String;
-    }
-    case ExprKind::Variable: {
-      const auto& var = static_cast<const VariableExpr&>(expr);
-      const Symbol* sym = symbols_.resolve(var.name);
-      if (!sym) {
-        throw err(var.line, "undeclared variable '" + var.name + "'");
-      }
-      if (sym->isResource) {
-        throw err(var.line, "resource '" + var.name + "' cannot be used as a value");
-      }
-      return sym->type;
-    }
-    case ExprKind::Unary: {
-      const auto& un = static_cast<const UnaryExpr&>(expr);
-      return checkExpr(*un.operand);
-    }
-    case ExprKind::Binary: {
-      const auto& bin = static_cast<const BinaryExpr&>(expr);
-      checkExpr(*bin.left);
-      checkExpr(*bin.right);
-      if (bin.op == BinaryOp::Eq || bin.op == BinaryOp::Ne || bin.op == BinaryOp::Lt ||
-          bin.op == BinaryOp::Le || bin.op == BinaryOp::Gt || bin.op == BinaryOp::Ge) {
-        return TypeTag::Bool;
-      }
-      return TypeTag::Int;
-    }
-    case ExprKind::Call: {
-      const auto& call = static_cast<const CallExpr&>(expr);
-      auto it = functions_.find(call.callee);
-      if (it == functions_.end()) {
-        throw err(call.line, "unknown function '" + call.callee + "'");
-      }
-      if (it->second->params.size() != call.args.size()) {
-        throw err(call.line, "argument count mismatch for '" + call.callee + "'");
-      }
-      for (const auto& arg : call.args) {
-        if (checkExpr(*arg) == TypeTag::Resource) {
-          throw err(call.line, "resources cannot be passed as arguments");
-        }
-      }
-      return TypeTag::Int;
-    }
-  }
-  return TypeTag::Unknown;
-}
-
-ResourceChecker::ResourceEnv ResourceChecker::merge(const ResourceEnv& a, const ResourceEnv& b,
-                                                    int line) const {
-  ResourceEnv out = a;
-  for (const auto& [name, state] : b) {
-    auto it = out.find(name);
-    if (it == out.end()) {
-      if (state == ResourceState::Held) {
-        throw err(line, "resource '" + name + "' is held on only one branch");
-      }
-      out[name] = state;
-    } else if (it->second != state) {
-      throw err(line, "resource '" + name + "' has inconsistent state across branches");
-    }
-  }
-  for (const auto& [name, state] : a) {
-    if (!b.count(name) && state == ResourceState::Held) {
-      throw err(line, "resource '" + name + "' is held on only one branch");
-    }
-  }
-  return out;
-}
-
-ResourceChecker::ResourceEnv ResourceChecker::snapshot(const ResourceEnv& env) { return env; }
-
-}  // namespace rajit
+}  // namespace tinyrjit

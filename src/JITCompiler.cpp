@@ -1,205 +1,95 @@
 #include "JITCompiler.h"
 
-#include <cstring>
-#include <iostream>
-#include <stdexcept>
-#include <vector>
+#include "CodeGenerator.h"
+#include "Error.h"
 
-namespace rajit {
+#include "llvm/Config/llvm-config.h"
+#include "llvm/ExecutionEngine/Orc/LLJIT.h"
+#include "llvm/Support/Error.h"
+#include "llvm/Support/TargetSelect.h"
 
-namespace {
+#include <cstdint>
 
-std::int64_t readI64(const std::vector<std::uint8_t>& code, std::size_t ip) {
-  std::int64_t value = 0;
-  std::memcpy(&value, code.data() + ip, sizeof(value));
-  return value;
-}
+namespace tinyrjit {
 
-std::int32_t readI32(const std::vector<std::uint8_t>& code, std::size_t ip) {
-  std::int32_t value = 0;
-  std::memcpy(&value, code.data() + ip, sizeof(value));
-  return value;
-}
+struct JITCompiler::Impl {
+  std::unique_ptr<llvm::orc::LLJIT> jit;
+};
 
-std::uint16_t readU16(const std::vector<std::uint8_t>& code, std::size_t ip) {
-  std::uint16_t value = 0;
-  std::memcpy(&value, code.data() + ip, sizeof(value));
-  return value;
-}
+JITCompiler::JITCompiler() : impl_(std::make_unique<Impl>()) {
+  llvm::InitializeNativeTarget();
+  llvm::InitializeNativeTargetAsmPrinter();
+  llvm::InitializeNativeTargetAsmParser();
 
-}  // namespace
-
-JITCompiler::JITCompiler(Profiler& profiler) : profiler_(profiler) {}
-
-bool JITCompiler::has(int loopId) const { return compiled_.count(loopId) != 0; }
-
-const Chunk* JITCompiler::chunk(int loopId) const {
-  auto it = compiled_.find(loopId);
-  return it == compiled_.end() ? nullptr : &it->second;
-}
-
-bool JITCompiler::maybeCompile(const WhileStmt& loop, const std::vector<std::string>& locals) {
-  if (!enabled_ || has(loop.loopId) || !profiler_.isHot(loop.loopId)) {
-    return has(loop.loopId);
+  auto expected = llvm::orc::LLJITBuilder().create();
+  if (!expected) {
+    std::string msg;
+    llvm::handleAllErrors(expected.takeError(), [&](const llvm::ErrorInfoBase& info) {
+      msg = info.message();
+    });
+    throw JITError(0, "Failed to create LLVM ORC LLJIT: " + msg);
   }
-  Chunk chunk;
-  std::string error;
-  if (!generator_.compileWhile(loop, locals, chunk, error)) {
-    return false;
-  }
-  compiled_[loop.loopId] = std::move(chunk);
-  return true;
+  impl_->jit = std::move(*expected);
 }
 
-bool JITCompiler::run(int loopId, std::unordered_map<std::string, std::int64_t>& env,
-                      std::ostream& output) {
-  auto it = compiled_.find(loopId);
-  if (it == compiled_.end()) {
-    return false;
+JITCompiler::~JITCompiler() = default;
+
+void JITCompiler::compile(const Program& program, const std::unordered_set<std::string>& eligible) {
+  compiled_.clear();
+  CodeGenerator gen;
+  ir_ = gen.generate(program, eligible);
+  if (eligible.empty()) {
+    return;
   }
-  return execute(it->second, env, output);
+  gen.install(*impl_->jit);
+  compiled_ = eligible;
 }
 
-bool JITCompiler::execute(const Chunk& chunk, std::unordered_map<std::string, std::int64_t>& env,
-                          std::ostream& output) const {
-  std::vector<std::int64_t> slots(chunk.slotNames.size(), 0);
-  for (std::size_t i = 0; i < chunk.slotNames.size(); ++i) {
-    auto found = env.find(chunk.slotNames[i]);
-    if (found != env.end()) {
-      slots[i] = found->second;
-    }
-  }
+bool JITCompiler::hasCompiled(const std::string& name) const {
+  return compiled_.count(name) != 0;
+}
 
-  std::vector<std::int64_t> stack;
-  std::size_t ip = 0;
-  auto push = [&](std::int64_t v) { stack.push_back(v); };
-  auto pop = [&]() {
-    if (stack.empty()) {
-      throw std::runtime_error("JIT stack underflow");
-    }
-    std::int64_t v = stack.back();
-    stack.pop_back();
-    return v;
+std::int32_t JITCompiler::invoke(const std::string& name, const std::vector<std::int32_t>& args) {
+  if (!hasCompiled(name)) {
+    throw JITError(0, "Function '" + name + "' was not JIT-compiled.");
+  }
+  auto addrOrErr = impl_->jit->lookup(name);
+  if (!addrOrErr) {
+    std::string msg;
+    llvm::handleAllErrors(addrOrErr.takeError(), [&](const llvm::ErrorInfoBase& info) {
+      msg = info.message();
+    });
+    throw JITError(0, "ORC lookup failed for '" + name + "': " + msg);
+  }
+  auto addr = *addrOrErr;
+
+  auto asPtr = [&](auto dummy) {
+    using Fn = decltype(dummy);
+#if LLVM_VERSION_MAJOR >= 15
+    return addr.toPtr<Fn>();
+#else
+    return reinterpret_cast<Fn>(static_cast<std::uintptr_t>(addr.getAddress()));
+#endif
   };
 
-  while (ip < chunk.code.size()) {
-    auto op = static_cast<OpCode>(chunk.code[ip++]);
-    switch (op) {
-      case OpCode::Push:
-        push(readI64(chunk.code, ip));
-        ip += 8;
-        break;
-      case OpCode::Load: {
-        std::uint16_t slot = readU16(chunk.code, ip);
-        ip += 2;
-        push(slots[slot]);
-        break;
-      }
-      case OpCode::Store: {
-        std::uint16_t slot = readU16(chunk.code, ip);
-        ip += 2;
-        slots[slot] = pop();
-        break;
-      }
-      case OpCode::Add: {
-        auto b = pop();
-        auto a = pop();
-        push(a + b);
-        break;
-      }
-      case OpCode::Sub: {
-        auto b = pop();
-        auto a = pop();
-        push(a - b);
-        break;
-      }
-      case OpCode::Mul: {
-        auto b = pop();
-        auto a = pop();
-        push(a * b);
-        break;
-      }
-      case OpCode::Div: {
-        auto b = pop();
-        auto a = pop();
-        if (b == 0) {
-          throw std::runtime_error("JIT division by zero");
-        }
-        push(a / b);
-        break;
-      }
-      case OpCode::Mod: {
-        auto b = pop();
-        auto a = pop();
-        if (b == 0) {
-          throw std::runtime_error("JIT division by zero");
-        }
-        push(a % b);
-        break;
-      }
-      case OpCode::Neg:
-        push(-pop());
-        break;
-      case OpCode::Eq: {
-        auto b = pop();
-        auto a = pop();
-        push(a == b);
-        break;
-      }
-      case OpCode::Ne: {
-        auto b = pop();
-        auto a = pop();
-        push(a != b);
-        break;
-      }
-      case OpCode::Lt: {
-        auto b = pop();
-        auto a = pop();
-        push(a < b);
-        break;
-      }
-      case OpCode::Le: {
-        auto b = pop();
-        auto a = pop();
-        push(a <= b);
-        break;
-      }
-      case OpCode::Gt: {
-        auto b = pop();
-        auto a = pop();
-        push(a > b);
-        break;
-      }
-      case OpCode::Ge: {
-        auto b = pop();
-        auto a = pop();
-        push(a >= b);
-        break;
-      }
-      case OpCode::Jmp:
-        ip = static_cast<std::size_t>(readI32(chunk.code, ip));
-        break;
-      case OpCode::JmpZ: {
-        std::int32_t target = readI32(chunk.code, ip);
-        ip += 4;
-        if (pop() == 0) {
-          ip = static_cast<std::size_t>(target);
-        }
-        break;
-      }
-      case OpCode::Print:
-        output << pop() << "\n";
-        break;
-      case OpCode::Halt:
-        goto done;
-    }
+  switch (args.size()) {
+    case 0:
+      return asPtr(static_cast<std::int32_t (*)()>(nullptr))();
+    case 1:
+      return asPtr(static_cast<std::int32_t (*)(std::int32_t)>(nullptr))(args[0]);
+    case 2:
+      return asPtr(static_cast<std::int32_t (*)(std::int32_t, std::int32_t)>(nullptr))(args[0],
+                                                                                    args[1]);
+    case 3:
+      return asPtr(static_cast<std::int32_t (*)(std::int32_t, std::int32_t, std::int32_t)>(nullptr))(
+          args[0], args[1], args[2]);
+    case 4:
+      return asPtr(static_cast<std::int32_t (*)(std::int32_t, std::int32_t, std::int32_t,
+                                               std::int32_t)>(nullptr))(args[0], args[1], args[2],
+                                                                        args[3]);
+    default:
+      throw JITError(0, "JIT invoke supports at most 4 arguments.");
   }
-
-done:
-  for (std::size_t i = 0; i < chunk.slotNames.size(); ++i) {
-    env[chunk.slotNames[i]] = slots[i];
-  }
-  return true;
 }
 
-}  // namespace rajit
+}  // namespace tinyrjit

@@ -1,85 +1,50 @@
 #pragma once
 
 #include "AST.h"
-#include "JITCompiler.h"
 #include "Profiler.h"
 
 #include <cstdint>
-#include <iosfwd>
-#include <stdexcept>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
-namespace rajit {
+namespace tinyrjit {
 
-class RuntimeError : public std::runtime_error {
- public:
-  int line;
-  RuntimeError(int line, const std::string& message)
-      : std::runtime_error(message), line(line) {}
-};
-
-enum class ValueKind { Int, Bool, String, Resource, Null };
-
-struct ResourceHandle {
-  ResourceKind kind = ResourceKind::File;
-  std::int64_t id = 0;
-  std::string label;
-  bool held = false;
-};
+class JITCompiler;
 
 struct Value {
-  ValueKind kind = ValueKind::Null;
-  std::int64_t i = 0;
-  bool b = false;
-  std::string s;
-  ResourceHandle resource;
-
-  static Value makeInt(std::int64_t v);
-  static Value makeBool(bool v);
-  static Value makeString(std::string v);
-  static Value makeResource(ResourceHandle h);
-  static Value makeNull();
-
-  bool isTruthy() const;
-  std::string toString() const;
+  TypeKind type = TypeKind::Int;
+  std::int32_t i = 0;
+  int handleId = -1;
+  std::string text;
 };
 
 class Interpreter {
  public:
-  Interpreter(std::ostream& output, Profiler& profiler, JITCompiler& jit);
+  Interpreter(Profiler& profiler, JITCompiler* jit);
 
-  Value interpret(const Program& program);
-  const Profiler& profiler() const { return profiler_; }
+  std::int32_t interpret(const Program& program);
 
  private:
-  struct Environment {
-    std::unordered_map<std::string, Value> values;
-    Environment* parent = nullptr;
+  using Env = std::unordered_map<std::string, Value>;
 
-    bool assign(const std::string& name, Value value);
-    void define(const std::string& name, Value value);
-    Value* get(const std::string& name);
-  };
-
-  struct ReturnJump {
-    Value value;
-  };
-
-  std::ostream& output_;
   Profiler& profiler_;
-  JITCompiler& jit_;
-  std::unordered_map<std::string, const FunctionStmt*> functions_;
-  std::int64_t nextResourceId_ = 1;
+  JITCompiler* jit_;
+  const Program* program_ = nullptr;
+  std::string currentFunction_;
+  std::unordered_map<std::string, const FunctionDecl*> functions_;
+  int nextHandle_ = 1;
+  struct HandleObject {
+    std::string path;
+    bool open = false;
+    bool used = false;
+  };
+  std::unordered_map<int, HandleObject> handles_;
 
-  Value executeFunction(const FunctionStmt& fn, const std::vector<Value>& args);
-  void execute(const Stmt& stmt, Environment& env);
-  Value evaluate(const Expr& expr, Environment& env);
-
-  std::vector<std::string> collectIntLocals(Environment& env) const;
-  void syncEnvFromInts(Environment& env,
-                       const std::unordered_map<std::string, std::int64_t>& ints) const;
+  Value call(const std::string& name, const std::vector<Value>& args, int line);
+  Value eval(const Expr& expr, Env& env);
+  void execStmt(const Stmt& stmt, Env& env, bool& returned, Value& ret);
 };
 
-}  // namespace rajit
+}  // namespace tinyrjit

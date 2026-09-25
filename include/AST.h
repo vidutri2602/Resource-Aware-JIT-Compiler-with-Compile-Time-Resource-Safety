@@ -1,164 +1,119 @@
 #pragma once
 
-#include <cstdint>
+#include "Token.h"
+
 #include <memory>
 #include <string>
 #include <vector>
 
-namespace rajit {
+namespace tinyrjit {
 
-enum class ExprKind {
-  Literal,
-  Variable,
-  Unary,
-  Binary,
-  Call
-};
+// TinyRAJIT has two user-visible types. String exists only as an
+// intermediate type for the argument of builtin open().
+enum class TypeKind { Int, Handle, String, Void };
 
-enum class StmtKind {
-  Let,
-  Assign,
-  Expr,
-  Print,
-  Return,
-  If,
-  While,
-  Block,
-  Acquire,
-  Release,
-  Function
-};
+inline const char* typeName(TypeKind type) {
+  switch (type) {
+    case TypeKind::Int:
+      return "Int";
+    case TypeKind::Handle:
+      return "Handle";
+    case TypeKind::String:
+      return "String";
+    case TypeKind::Void:
+      return "Void";
+  }
+  return "Unknown";
+}
 
-enum class LiteralKind { Integer, String, Boolean };
-
-enum class ResourceKind { File, Mem, Lock };
-
-enum class UnaryOp { Negate, Not };
-enum class BinaryOp { Add, Sub, Mul, Div, Mod, Eq, Ne, Lt, Le, Gt, Ge };
+// ---- expressions (syntax tree for values) ----
 
 struct Expr {
-  ExprKind kind;
-  int line = 1;
   virtual ~Expr() = default;
-
- protected:
-  explicit Expr(ExprKind k) : kind(k) {}
+  int line = 0;
+  TypeKind inferredType = TypeKind::Int;
 };
 
-struct LiteralExpr : Expr {
-  LiteralKind literalKind = LiteralKind::Integer;
-  std::int64_t intValue = 0;
-  std::string stringValue;
-  bool boolValue = false;
+struct NumberExpr : Expr {
+  int value = 0;
+};
 
-  LiteralExpr() : Expr(ExprKind::Literal) {}
+struct StringExpr : Expr {
+  std::string value;
 };
 
 struct VariableExpr : Expr {
   std::string name;
-  VariableExpr() : Expr(ExprKind::Variable) {}
-};
-
-struct UnaryExpr : Expr {
-  UnaryOp op = UnaryOp::Negate;
-  std::unique_ptr<Expr> operand;
-  UnaryExpr() : Expr(ExprKind::Unary) {}
 };
 
 struct BinaryExpr : Expr {
-  BinaryOp op = BinaryOp::Add;
+  TokenType op = TokenType::Plus;
   std::unique_ptr<Expr> left;
   std::unique_ptr<Expr> right;
-  BinaryExpr() : Expr(ExprKind::Binary) {}
 };
 
 struct CallExpr : Expr {
   std::string callee;
   std::vector<std::unique_ptr<Expr>> args;
-  CallExpr() : Expr(ExprKind::Call) {}
 };
+
+// ---- statements ----
 
 struct Stmt {
-  StmtKind kind;
-  int line = 1;
   virtual ~Stmt() = default;
-
- protected:
-  explicit Stmt(StmtKind k) : kind(k) {}
+  int line = 0;
 };
 
-struct LetStmt : Stmt {
+struct VariableDeclStmt : Stmt {
   std::string name;
-  std::unique_ptr<Expr> initializer;
-  LetStmt() : Stmt(StmtKind::Let) {}
+  TypeKind type = TypeKind::Int;
+  std::unique_ptr<Expr> init;
 };
 
-struct AssignStmt : Stmt {
+struct AssignmentStmt : Stmt {
   std::string name;
   std::unique_ptr<Expr> value;
-  AssignStmt() : Stmt(StmtKind::Assign) {}
 };
 
-struct ExprStmt : Stmt {
+struct ExpressionStmt : Stmt {
   std::unique_ptr<Expr> expr;
-  ExprStmt() : Stmt(StmtKind::Expr) {}
-};
-
-struct PrintStmt : Stmt {
-  std::unique_ptr<Expr> expr;
-  PrintStmt() : Stmt(StmtKind::Print) {}
 };
 
 struct ReturnStmt : Stmt {
-  std::unique_ptr<Expr> value;  // optional
-  ReturnStmt() : Stmt(StmtKind::Return) {}
-};
-
-struct BlockStmt : Stmt {
-  std::vector<std::unique_ptr<Stmt>> statements;
-  BlockStmt() : Stmt(StmtKind::Block) {}
+  std::unique_ptr<Expr> value;
 };
 
 struct IfStmt : Stmt {
   std::unique_ptr<Expr> condition;
-  std::unique_ptr<Stmt> thenBranch;
-  std::unique_ptr<Stmt> elseBranch;  // optional
-  IfStmt() : Stmt(StmtKind::If) {}
+  std::vector<std::unique_ptr<Stmt>> thenBranch;
+  std::vector<std::unique_ptr<Stmt>> elseBranch;
 };
 
 struct WhileStmt : Stmt {
   std::unique_ptr<Expr> condition;
-  std::unique_ptr<Stmt> body;
-  int loopId = -1;
-  WhileStmt() : Stmt(StmtKind::While) {}
+  std::vector<std::unique_ptr<Stmt>> body;
 };
 
-struct AcquireStmt : Stmt {
+struct Param {
   std::string name;
-  ResourceKind resourceKind = ResourceKind::File;
-  std::unique_ptr<Expr> argument;  // file name or mem size; optional for lock
-  AcquireStmt() : Stmt(StmtKind::Acquire) {}
+  TypeKind type = TypeKind::Int;
+  int line = 0;
 };
 
-struct ReleaseStmt : Stmt {
+struct FunctionDecl {
   std::string name;
-  ReleaseStmt() : Stmt(StmtKind::Release) {}
-};
-
-struct FunctionStmt : Stmt {
-  std::string name;
-  std::vector<std::string> params;
-  std::unique_ptr<BlockStmt> body;
-  FunctionStmt() : Stmt(StmtKind::Function) {}
+  std::vector<Param> params;
+  TypeKind returnType = TypeKind::Int;
+  std::vector<std::unique_ptr<Stmt>> body;
+  int line = 0;
 };
 
 struct Program {
-  std::vector<std::unique_ptr<FunctionStmt>> functions;
+  std::vector<std::unique_ptr<FunctionDecl>> functions;
 };
 
 std::string dumpAst(const Program& program);
-std::string resourceKindName(ResourceKind kind);
-std::string binaryOpName(BinaryOp op);
-std::string unaryOpName(UnaryOp op);
+std::string dumpExpr(const Expr& expr, const std::string& indent);
+std::string dumpStmt(const Stmt& stmt, const std::string& indent);
 
-}  // namespace rajit
+}  // namespace tinyrjit

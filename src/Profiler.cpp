@@ -1,18 +1,33 @@
 #include "Profiler.h"
 
-namespace rajit {
+#include <iomanip>
+#include <sstream>
 
-Profiler::Profiler(std::int64_t hotThreshold) : hotThreshold_(hotThreshold) {}
+namespace tinyrjit {
 
-void Profiler::reset() { counts_.clear(); }
+Profiler::Profiler(int hotThreshold) : hotThreshold_(hotThreshold) {}
 
-void Profiler::hit(int loopId) { counts_[loopId]++; }
+void Profiler::recordFunctionCall(const std::string& name) { counts_[name]++; }
 
-std::int64_t Profiler::count(int loopId) const {
-  auto it = counts_.find(loopId);
+int Profiler::getCallCount(const std::string& name) const {
+  auto it = counts_.find(name);
   return it == counts_.end() ? 0 : it->second;
 }
 
-bool Profiler::isHot(int loopId) const { return count(loopId) >= hotThreshold_; }
+bool Profiler::isHot(const std::string& name) const {
+  return getCallCount(name) >= hotThreshold_;
+}
 
-}  // namespace rajit
+std::string Profiler::dump() const {
+  std::ostringstream out;
+  out << "Function           Calls       Status\n";
+  out << "----------------------------------------\n";
+  for (const auto& kv : counts_) {
+    out << std::left << std::setw(18) << kv.first << " "
+        << std::setw(11) << kv.second << " "
+        << (kv.second >= hotThreshold_ ? "HOT" : "COLD") << "\n";
+  }
+  return out.str();
+}
+
+}  // namespace tinyrjit

@@ -1,30 +1,24 @@
 #pragma once
 
 #include "AST.h"
-#include "Lexer.h"
+#include "Token.h"
 
-#include <stdexcept>
+#include <initializer_list>
 #include <string>
 #include <vector>
 
-namespace rajit {
+namespace tinyrjit {
 
-class ParseError : public std::runtime_error {
- public:
-  int line;
-  ParseError(int line, const std::string& message)
-      : std::runtime_error(message), line(line) {}
-};
-
+// Recursive-descent parser: tokens -> AST (syntax analysis).
 class Parser {
  public:
   explicit Parser(std::vector<Token> tokens);
+
   Program parse();
 
  private:
   std::vector<Token> tokens_;
   std::size_t current_ = 0;
-  int nextLoopId_ = 0;
 
   bool isAtEnd() const;
   const Token& peek() const;
@@ -34,19 +28,25 @@ class Parser {
   bool match(TokenType type);
   bool matchAny(std::initializer_list<TokenType> types);
   const Token& consume(TokenType type, const std::string& message);
-  ParseError error(const Token& token, const std::string& message) const;
+  [[noreturn]] void error(const Token& token, const std::string& message);
 
-  std::unique_ptr<FunctionStmt> function();
-  std::unique_ptr<BlockStmt> block();
-  std::unique_ptr<Stmt> statement();
-  std::unique_ptr<Stmt> letOrAcquire();
-  std::unique_ptr<Expr> expression();
-  std::unique_ptr<Expr> equality();
-  std::unique_ptr<Expr> comparison();
-  std::unique_ptr<Expr> term();
-  std::unique_ptr<Expr> factor();
-  std::unique_ptr<Expr> unary();
-  std::unique_ptr<Expr> primary();
+  std::unique_ptr<FunctionDecl> parseFunction();
+  std::vector<Param> parseParameters();
+  TypeKind parseType();
+  std::vector<std::unique_ptr<Stmt>> parseBlock();
+  std::unique_ptr<Stmt> parseStatement();
+  std::unique_ptr<Stmt> parseVariableDeclaration();
+  std::unique_ptr<Stmt> parseAssignmentOrCall();
+  std::unique_ptr<Stmt> parseIf();
+  std::unique_ptr<Stmt> parseWhile();
+  std::unique_ptr<Stmt> parseReturn();
+
+  std::unique_ptr<Expr> parseExpression();
+  std::unique_ptr<Expr> parseComparison();
+  std::unique_ptr<Expr> parseAddition();
+  std::unique_ptr<Expr> parseMultiplication();
+  std::unique_ptr<Expr> parseUnary();
+  std::unique_ptr<Expr> parsePrimary();
 };
 
-}  // namespace rajit
+}  // namespace tinyrjit

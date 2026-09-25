@@ -1,9 +1,8 @@
 fn main() -> Int {
     let h: Handle = open("data.txt");
 
-    use(h);
-
     close(h);
+    use(h);
 
     return 0;
 }

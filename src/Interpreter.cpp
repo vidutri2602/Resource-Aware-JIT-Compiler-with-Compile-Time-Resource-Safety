@@ -1,375 +1,222 @@
 #include "Interpreter.h"
 
-#include <iostream>
-#include <utility>
+#include "Error.h"
+#include "JITCompiler.h"
 
-namespace rajit {
+namespace tinyrjit {
 
-Value Value::makeInt(std::int64_t v) {
-  Value value;
-  value.kind = ValueKind::Int;
-  value.i = v;
-  return value;
-}
+Interpreter::Interpreter(Profiler& profiler, JITCompiler* jit)
+    : profiler_(profiler), jit_(jit) {}
 
-Value Value::makeBool(bool v) {
-  Value value;
-  value.kind = ValueKind::Bool;
-  value.b = v;
-  value.i = v ? 1 : 0;
-  return value;
-}
-
-Value Value::makeString(std::string v) {
-  Value value;
-  value.kind = ValueKind::String;
-  value.s = std::move(v);
-  return value;
-}
-
-Value Value::makeResource(ResourceHandle h) {
-  Value value;
-  value.kind = ValueKind::Resource;
-  value.resource = std::move(h);
-  return value;
-}
-
-Value Value::makeNull() { return Value{}; }
-
-bool Value::isTruthy() const {
-  switch (kind) {
-    case ValueKind::Int:
-      return i != 0;
-    case ValueKind::Bool:
-      return b;
-    case ValueKind::String:
-      return !s.empty();
-    case ValueKind::Resource:
-      return resource.held;
-    case ValueKind::Null:
-      return false;
-  }
-  return false;
-}
-
-std::string Value::toString() const {
-  switch (kind) {
-    case ValueKind::Int:
-      return std::to_string(i);
-    case ValueKind::Bool:
-      return b ? "true" : "false";
-    case ValueKind::String:
-      return s;
-    case ValueKind::Resource:
-      return resourceKindName(resource.kind) + "#" + std::to_string(resource.id);
-    case ValueKind::Null:
-      return "null";
-  }
-  return "null";
-}
-
-bool Interpreter::Environment::assign(const std::string& name, Value value) {
-  auto it = values.find(name);
-  if (it != values.end()) {
-    it->second = std::move(value);
-    return true;
-  }
-  if (parent) {
-    return parent->assign(name, std::move(value));
-  }
-  return false;
-}
-
-void Interpreter::Environment::define(const std::string& name, Value value) {
-  values[name] = std::move(value);
-}
-
-Value* Interpreter::Environment::get(const std::string& name) {
-  auto it = values.find(name);
-  if (it != values.end()) {
-    return &it->second;
-  }
-  if (parent) {
-    return parent->get(name);
-  }
-  return nullptr;
-}
-
-Interpreter::Interpreter(std::ostream& output, Profiler& profiler, JITCompiler& jit)
-    : output_(output), profiler_(profiler), jit_(jit) {}
-
-namespace {
-
-RuntimeError rt(int line, const std::string& message) {
-  return RuntimeError(line, "runtime error at line " + std::to_string(line) + ": " + message);
-}
-
-Value binary(const BinaryExpr& expr, const Value& left, const Value& right) {
-  auto asInt = [](const Value& v) -> std::int64_t {
-    if (v.kind == ValueKind::Int) {
-      return v.i;
-    }
-    if (v.kind == ValueKind::Bool) {
-      return v.b ? 1 : 0;
-    }
-    throw rt(0, "operands must be numeric");
-  };
-
-  switch (expr.op) {
-    case BinaryOp::Add:
-      return Value::makeInt(asInt(left) + asInt(right));
-    case BinaryOp::Sub:
-      return Value::makeInt(asInt(left) - asInt(right));
-    case BinaryOp::Mul:
-      return Value::makeInt(asInt(left) * asInt(right));
-    case BinaryOp::Div: {
-      auto b = asInt(right);
-      if (b == 0) {
-        throw rt(expr.line, "division by zero");
-      }
-      return Value::makeInt(asInt(left) / b);
-    }
-    case BinaryOp::Mod: {
-      auto b = asInt(right);
-      if (b == 0) {
-        throw rt(expr.line, "division by zero");
-      }
-      return Value::makeInt(asInt(left) % b);
-    }
-    case BinaryOp::Eq:
-      return Value::makeBool(asInt(left) == asInt(right));
-    case BinaryOp::Ne:
-      return Value::makeBool(asInt(left) != asInt(right));
-    case BinaryOp::Lt:
-      return Value::makeBool(asInt(left) < asInt(right));
-    case BinaryOp::Le:
-      return Value::makeBool(asInt(left) <= asInt(right));
-    case BinaryOp::Gt:
-      return Value::makeBool(asInt(left) > asInt(right));
-    case BinaryOp::Ge:
-      return Value::makeBool(asInt(left) >= asInt(right));
-  }
-  return Value::makeNull();
-}
-
-}  // namespace
-
-Value Interpreter::interpret(const Program& program) {
+std::int32_t Interpreter::interpret(const Program& program) {
+  program_ = &program;
   functions_.clear();
   for (const auto& fn : program.functions) {
     functions_[fn->name] = fn.get();
   }
-  auto it = functions_.find("main");
-  if (it == functions_.end()) {
-    throw rt(1, "missing main");
-  }
-  return executeFunction(*it->second, {});
+  Value result = call("main", {}, 1);
+  return result.i;
 }
 
-Value Interpreter::executeFunction(const FunctionStmt& fn, const std::vector<Value>& args) {
-  Environment env;
-  if (args.size() != fn.params.size()) {
-    throw rt(fn.line, "argument count mismatch");
+Value Interpreter::call(const std::string& name, const std::vector<Value>& args, int line) {
+  if (name == "open") {
+    Value h;
+    h.type = TypeKind::Handle;
+    h.handleId = nextHandle_++;
+    HandleObject obj;
+    obj.path = args.empty() ? "" : args[0].text;
+    obj.open = true;
+    handles_[h.handleId] = obj;
+    return h;
   }
-  for (std::size_t i = 0; i < fn.params.size(); ++i) {
-    env.define(fn.params[i], args[i]);
+  if (name == "use") {
+    if (args.size() != 1 || args[0].type != TypeKind::Handle) {
+      throw RuntimeError(line, "use() requires a Handle.");
+    }
+    auto it = handles_.find(args[0].handleId);
+    if (it == handles_.end() || !it->second.open) {
+      throw RuntimeError(line, "Cannot use Handle that is not open.");
+    }
+    it->second.used = true;
+    Value v;
+    v.i = 0;
+    return v;
   }
-  try {
-    execute(*fn.body, env);
-  } catch (const ReturnJump& ret) {
-    return ret.value;
+  if (name == "close") {
+    if (args.size() != 1 || args[0].type != TypeKind::Handle) {
+      throw RuntimeError(line, "close() requires a Handle.");
+    }
+    auto it = handles_.find(args[0].handleId);
+    if (it == handles_.end() || !it->second.open) {
+      throw RuntimeError(line, "Cannot close Handle that is not open.");
+    }
+    it->second.open = false;
+    Value v;
+    v.i = 0;
+    return v;
   }
-  return Value::makeInt(0);
+
+  auto fnIt = functions_.find(name);
+  if (fnIt == functions_.end()) {
+    throw RuntimeError(line, "Unknown function '" + name + "'.");
+  }
+  const FunctionDecl* fn = fnIt->second;
+  if (args.size() != fn->params.size()) {
+    throw RuntimeError(line, "Wrong number of arguments to '" + name + "'.");
+  }
+
+  profiler_.recordFunctionCall(name);
+  std::string previous = currentFunction_;
+  currentFunction_ = name;
+
+  if (jit_ && jit_->hasCompiled(name)) {
+    std::vector<std::int32_t> ints;
+    ints.reserve(args.size());
+    for (const auto& a : args) {
+      ints.push_back(a.i);
+    }
+    Value v;
+    v.i = jit_->invoke(name, ints);
+    currentFunction_ = previous;
+    return v;
+  }
+
+  Env env;
+  for (std::size_t i = 0; i < fn->params.size(); ++i) {
+    env[fn->params[i].name] = args[i];
+  }
+  bool returned = false;
+  Value ret;
+  for (const auto& stmt : fn->body) {
+    execStmt(*stmt, env, returned, ret);
+    if (returned) {
+      currentFunction_ = previous;
+      return ret;
+    }
+  }
+  currentFunction_ = previous;
+  throw RuntimeError(fn->line, "Function '" + name + "' ended without return.");
 }
 
-void Interpreter::execute(const Stmt& stmt, Environment& env) {
-  switch (stmt.kind) {
-    case StmtKind::Let: {
-      const auto& s = static_cast<const LetStmt&>(stmt);
-      env.define(s.name, evaluate(*s.initializer, env));
-      break;
+Value Interpreter::eval(const Expr& expr, Env& env) {
+  if (const auto* n = dynamic_cast<const NumberExpr*>(&expr)) {
+    Value v;
+    v.i = n->value;
+    return v;
+  }
+  if (const auto* s = dynamic_cast<const StringExpr*>(&expr)) {
+    Value v;
+    v.type = TypeKind::String;
+    v.text = s->value;
+    return v;
+  }
+  if (const auto* var = dynamic_cast<const VariableExpr*>(&expr)) {
+    auto it = env.find(var->name);
+    if (it == env.end()) {
+      throw RuntimeError(var->line, "Variable '" + var->name + "' has not been declared.");
     }
-    case StmtKind::Assign: {
-      const auto& s = static_cast<const AssignStmt&>(stmt);
-      if (!env.assign(s.name, evaluate(*s.value, env))) {
-        throw rt(s.line, "undeclared variable '" + s.name + "'");
-      }
-      break;
-    }
-    case StmtKind::Expr: {
-      const auto& s = static_cast<const ExprStmt&>(stmt);
-      evaluate(*s.expr, env);
-      break;
-    }
-    case StmtKind::Print: {
-      const auto& s = static_cast<const PrintStmt&>(stmt);
-      output_ << evaluate(*s.expr, env).toString() << "\n";
-      break;
-    }
-    case StmtKind::Return: {
-      const auto& s = static_cast<const ReturnStmt&>(stmt);
-      Value value = s.value ? evaluate(*s.value, env) : Value::makeNull();
-      throw ReturnJump{std::move(value)};
-    }
-    case StmtKind::If: {
-      const auto& s = static_cast<const IfStmt&>(stmt);
-      if (evaluate(*s.condition, env).isTruthy()) {
-        execute(*s.thenBranch, env);
-      } else if (s.elseBranch) {
-        execute(*s.elseBranch, env);
-      }
-      break;
-    }
-    case StmtKind::While: {
-      const auto& s = static_cast<const WhileStmt&>(stmt);
-      while (evaluate(*s.condition, env).isTruthy()) {
-        profiler_.hit(s.loopId);
-        if (jit_.enabled() && jit_.has(s.loopId)) {
-          auto ints = std::unordered_map<std::string, std::int64_t>{};
-          for (const auto& name : collectIntLocals(env)) {
-            if (Value* v = env.get(name)) {
-              ints[name] = v->i;
-            }
-          }
-          jit_.run(s.loopId, ints, output_);
-          syncEnvFromInts(env, ints);
-          break;
+    return it->second;
+  }
+  if (const auto* b = dynamic_cast<const BinaryExpr*>(&expr)) {
+    Value l = eval(*b->left, env);
+    Value r = eval(*b->right, env);
+    Value v;
+    switch (b->op) {
+      case TokenType::Plus:
+        v.i = l.i + r.i;
+        break;
+      case TokenType::Minus:
+        v.i = l.i - r.i;
+        break;
+      case TokenType::Star:
+        v.i = l.i * r.i;
+        break;
+      case TokenType::Slash:
+        if (r.i == 0) {
+          throw RuntimeError(b->line, "Division by zero.");
         }
-        execute(*s.body, env);
-        if (jit_.enabled() && profiler_.isHot(s.loopId) && !jit_.has(s.loopId)) {
-          jit_.maybeCompile(s, collectIntLocals(env));
+        v.i = l.i / r.i;
+        break;
+      case TokenType::EqualEqual:
+        v.i = l.i == r.i;
+        break;
+      case TokenType::Less:
+        v.i = l.i < r.i;
+        break;
+      case TokenType::Greater:
+        v.i = l.i > r.i;
+        break;
+      case TokenType::LessEqual:
+        v.i = l.i <= r.i;
+        break;
+      case TokenType::GreaterEqual:
+        v.i = l.i >= r.i;
+        break;
+      default:
+        throw RuntimeError(b->line, "Unknown operator.");
+    }
+    return v;
+  }
+  if (const auto* c = dynamic_cast<const CallExpr*>(&expr)) {
+    std::vector<Value> args;
+    for (const auto& arg : c->args) {
+      args.push_back(eval(*arg, env));
+    }
+    return call(c->callee, args, c->line);
+  }
+  throw RuntimeError(expr.line, "internal error: unknown expression");
+}
+
+void Interpreter::execStmt(const Stmt& stmt, Env& env, bool& returned, Value& ret) {
+  if (const auto* d = dynamic_cast<const VariableDeclStmt*>(&stmt)) {
+    env[d->name] = eval(*d->init, env);
+    env[d->name].type = d->type;
+    return;
+  }
+  if (const auto* a = dynamic_cast<const AssignmentStmt*>(&stmt)) {
+    auto it = env.find(a->name);
+    if (it == env.end()) {
+      throw RuntimeError(a->line, "Variable '" + a->name + "' has not been declared.");
+    }
+    TypeKind t = it->second.type;
+    it->second = eval(*a->value, env);
+    it->second.type = t;
+    return;
+  }
+  if (const auto* e = dynamic_cast<const ExpressionStmt*>(&stmt)) {
+    eval(*e->expr, env);
+    return;
+  }
+  if (const auto* r = dynamic_cast<const ReturnStmt*>(&stmt)) {
+    ret = eval(*r->value, env);
+    returned = true;
+    return;
+  }
+  if (const auto* i = dynamic_cast<const IfStmt*>(&stmt)) {
+    Value cond = eval(*i->condition, env);
+    const auto& branch = cond.i != 0 ? i->thenBranch : i->elseBranch;
+    for (const auto& s : branch) {
+      execStmt(*s, env, returned, ret);
+      if (returned) {
+        return;
+      }
+    }
+    return;
+  }
+  if (const auto* w = dynamic_cast<const WhileStmt*>(&stmt)) {
+    while (eval(*w->condition, env).i != 0) {
+      if (!currentFunction_.empty()) {
+        profiler_.recordFunctionCall(currentFunction_);
+      }
+      for (const auto& s : w->body) {
+        execStmt(*s, env, returned, ret);
+        if (returned) {
+          return;
         }
       }
-      break;
     }
-    case StmtKind::Block: {
-      const auto& s = static_cast<const BlockStmt&>(stmt);
-      Environment inner;
-      inner.parent = &env;
-      for (const auto& innerStmt : s.statements) {
-        execute(*innerStmt, inner);
-      }
-      break;
-    }
-    case StmtKind::Acquire: {
-      const auto& s = static_cast<const AcquireStmt&>(stmt);
-      ResourceHandle handle;
-      handle.kind = s.resourceKind;
-      handle.id = nextResourceId_++;
-      handle.held = true;
-      if (s.argument) {
-        handle.label = evaluate(*s.argument, env).toString();
-      }
-      output_ << "[acquire " << resourceKindName(handle.kind);
-      if (!handle.label.empty()) {
-        output_ << " " << handle.label;
-      }
-      output_ << " -> " << s.name << "]\n";
-      env.define(s.name, Value::makeResource(std::move(handle)));
-      break;
-    }
-    case StmtKind::Release: {
-      const auto& s = static_cast<const ReleaseStmt&>(stmt);
-      Value* value = env.get(s.name);
-      if (!value || value->kind != ValueKind::Resource || !value->resource.held) {
-        throw rt(s.line, "invalid release of '" + s.name + "'");
-      }
-      value->resource.held = false;
-      output_ << "[release " << s.name << "]\n";
-      break;
-    }
-    case StmtKind::Function:
-      break;
+    return;
   }
 }
 
-Value Interpreter::evaluate(const Expr& expr, Environment& env) {
-  switch (expr.kind) {
-    case ExprKind::Literal: {
-      const auto& lit = static_cast<const LiteralExpr&>(expr);
-      if (lit.literalKind == LiteralKind::Integer) {
-        return Value::makeInt(lit.intValue);
-      }
-      if (lit.literalKind == LiteralKind::Boolean) {
-        return Value::makeBool(lit.boolValue);
-      }
-      return Value::makeString(lit.stringValue);
-    }
-    case ExprKind::Variable: {
-      const auto& var = static_cast<const VariableExpr&>(expr);
-      Value* value = env.get(var.name);
-      if (!value) {
-        throw rt(var.line, "undeclared variable '" + var.name + "'");
-      }
-      return *value;
-    }
-    case ExprKind::Unary: {
-      const auto& un = static_cast<const UnaryExpr&>(expr);
-      Value operand = evaluate(*un.operand, env);
-      return Value::makeInt(-operand.i);
-    }
-    case ExprKind::Binary: {
-      const auto& bin = static_cast<const BinaryExpr&>(expr);
-      Value left = evaluate(*bin.left, env);
-      Value right = evaluate(*bin.right, env);
-      try {
-        return binary(bin, left, right);
-      } catch (const RuntimeError& error) {
-        if (error.line == 0) {
-          throw rt(bin.line, error.what());
-        }
-        throw;
-      }
-    }
-    case ExprKind::Call: {
-      const auto& call = static_cast<const CallExpr&>(expr);
-      auto it = functions_.find(call.callee);
-      if (it == functions_.end()) {
-        throw rt(call.line, "unknown function '" + call.callee + "'");
-      }
-      std::vector<Value> args;
-      args.reserve(call.args.size());
-      for (const auto& arg : call.args) {
-        args.push_back(evaluate(*arg, env));
-      }
-      return executeFunction(*it->second, args);
-    }
-  }
-  return Value::makeNull();
-}
-
-std::vector<std::string> Interpreter::collectIntLocals(Environment& env) const {
-  std::unordered_map<std::string, bool> seen;
-  auto collect = [&](auto&& self, Environment* current) -> void {
-    if (!current) {
-      return;
-    }
-    self(self, current->parent);
-    for (auto& [name, value] : current->values) {
-      seen[name] = value.kind == ValueKind::Int || value.kind == ValueKind::Bool;
-    }
-  };
-  collect(collect, &env);
-  std::vector<std::string> names;
-  for (const auto& [name, isInt] : seen) {
-    if (isInt) {
-      names.push_back(name);
-    }
-  }
-  return names;
-}
-
-void Interpreter::syncEnvFromInts(
-    Environment& env, const std::unordered_map<std::string, std::int64_t>& ints) const {
-  for (const auto& [name, value] : ints) {
-    if (Value* slot = env.get(name)) {
-      if (slot->kind == ValueKind::Bool) {
-        *slot = Value::makeBool(value != 0);
-      } else {
-        *slot = Value::makeInt(value);
-      }
-    }
-  }
-}
-
-}  // namespace rajit
+}  // namespace tinyrjit
