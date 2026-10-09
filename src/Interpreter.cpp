@@ -1,11 +1,10 @@
 #include "Interpreter.h"
 
 #include "Error.h"
-#include "JITCompiler.h"
 
 namespace tinyrjit {
 
-Interpreter::Interpreter(Profiler& profiler, JITCompiler* jit)
+Interpreter::Interpreter(Profiler& profiler, CompiledFunctionHost* jit)
     : profiler_(profiler), jit_(jit) {}
 
 std::int32_t Interpreter::interpret(const Program& program) {

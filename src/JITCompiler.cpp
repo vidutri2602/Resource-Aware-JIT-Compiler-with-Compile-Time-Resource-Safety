@@ -4,11 +4,15 @@
 #include "Error.h"
 
 #include "llvm/Config/llvm-config.h"
+#include "llvm/ExecutionEngine/Orc/AbsoluteSymbols.h"
+#include "llvm/ExecutionEngine/Orc/ExecutionUtils.h"
 #include "llvm/ExecutionEngine/Orc/LLJIT.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/TargetSelect.h"
 
 #include <cstdint>
+
+extern "C" void tinyrajit_noop_runtime() {}
 
 namespace tinyrjit {
 
@@ -30,6 +34,25 @@ JITCompiler::JITCompiler() : impl_(std::make_unique<Impl>()) {
     throw JITError(0, "Failed to create LLVM ORC LLJIT: " + msg);
   }
   impl_->jit = std::move(*expected);
+
+  auto& jd = impl_->jit->getMainJITDylib();
+  auto gen = llvm::orc::DynamicLibrarySearchGenerator::GetForCurrentProcess(
+      impl_->jit->getDataLayout().getGlobalPrefix());
+  if (gen) {
+    jd.addGenerator(std::move(*gen));
+  }
+
+  // Under Windows/MinGW, LLVM codegen for 'main' generates a call to '__main' runtime startup.
+  llvm::orc::SymbolMap symbols;
+  symbols[impl_->jit->mangleAndIntern("__main")] = {
+      llvm::orc::ExecutorAddr::fromPtr(&tinyrajit_noop_runtime),
+      llvm::JITSymbolFlags::Exported | llvm::JITSymbolFlags::Callable
+  };
+  symbols[impl_->jit->getExecutionSession().intern("__main")] = {
+      llvm::orc::ExecutorAddr::fromPtr(&tinyrajit_noop_runtime),
+      llvm::JITSymbolFlags::Exported | llvm::JITSymbolFlags::Callable
+  };
+  (void)jd.define(llvm::orc::absoluteSymbols(std::move(symbols)));
 }
 
 JITCompiler::~JITCompiler() = default;

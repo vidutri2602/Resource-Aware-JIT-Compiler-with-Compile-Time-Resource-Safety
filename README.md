@@ -1,8 +1,6 @@
 # Resource-Aware Profiling-Guided JIT Compiler (TinyRAJIT)
 
-A student Compiler Design project: a small language (`TinyRAJIT`) with a full frontend, compile-time **Handle** protocol checking, a tree-walking interpreter, runtime profiling, and LLVM ORC JIT for numeric functions.
-
-This is a teaching compiler, not a production toolchain.
+A Computer Science Engineering Compiler Design project: a custom language (`TinyRAJIT`) featuring a complete frontend, compile-time **Handle** typestate verification, an AST tree-walking interpreter, a runtime profiler, and native **LLVM ORC JIT** compilation for numeric functions.
 
 ---
 
@@ -10,90 +8,57 @@ This is a teaching compiler, not a production toolchain.
 
 **Resource-Aware Profiling-Guided JIT Compiler**  
 Language: **TinyRAJIT**  
-Driver: `resourcejit`
+Driver Binary: `resourcejit`
 
-## 2. Abstract
+---
 
-TinyRAJIT compiles and runs a tiny C-like language. Source is lexed and parsed into an AST, checked with a symbol table and type rules, then checked by a **resource-state analyzer** for `Handle` values (`open` / `use` / `close`). Valid programs run on an interpreter. A profiler counts function activity; hot, resource-free numeric functions may be compiled with **LLVM IR** and executed through **LLVM ORC JIT**.
+## 2. Abstract & Objective
+
+TinyRAJIT compiles and executes a strongly-typed procedural language. The source code is lexed into tokens, parsed into an Abstract Syntax Tree (AST), checked with a scoped symbol table and semantic type rules, and analyzed by a custom **typestate resource checker** enforcing a strict protocol on `Handle` types (`open` $\to$ `use` $\to$ `close`). Valid programs execute via an AST interpreter. An integrated runtime profiler monitors function execution frequency; functions identified as hot and purely numeric are dynamically selected by a JIT policy engine, compiled into verified **LLVM IR**, and natively executed using the **LLVM ORC JIT** engine.
+
+---
 
 ## 3. Problem Statement
 
-Introductory compilers often stop at parsing or interpretation. Real systems also need static safety and a story for “hot” code. This project demonstrates those compiler-design stages on one small language, with **resource safety** as the distinctive static analysis.
+Standard pedagogical compilers often terminate at syntax analysis or basic interpretation, without addressing static safety for stateful operating system resources (such as file handles, sockets, or hardware buffers) or demonstrating modern runtime optimization. Real-world runtimes require both compile-time safety invariants and tiered execution strategies. TinyRAJIT demonstrates an end-to-end compiler addressing both problems: static typestate safety and profiling-guided JIT compilation.
 
-## 4. Motivation
+---
 
-File-like resources have a simple protocol: open, use while open, close once. Encoding that protocol in a compiler pass shows how semantic analysis can prevent classes of bugs before execution. Pairing that with a profiler and LLVM JIT shows how an interpreter and native code can coexist.
-
-## 5. Objectives
-
-- Implement lexical analysis, recursive-descent parsing, and an AST.
-- Maintain a scoped symbol table and type checks.
-- Analyze `Handle` states conservatively across `if`/`while`.
-- Interpret programs after all static checks succeed.
-- Profile calls and loop activity; decide JIT eligibility.
-- Emit LLVM IR and run eligible functions with ORC JIT.
-- Provide CLI flags, examples, tests, and a prototype benchmark.
-
-## 6. Scope
-
-**In scope:** `Int` and `Handle`, functions, `if`/`else`, `while`, arithmetic, comparisons, builtins `open`/`use`/`close`, interpreter, profiler, LLVM IR + ORC JIT for **numeric** functions.
-
-**Out of scope:** classes, arrays, structs, generics, exceptions, GC, concurrency, multiple resource types, custom machine-code emitters, production optimizations.
-
-## 7. Compiler Architecture
+## 4. Compiler Architecture
 
 ```text
-SOURCE CODE
-     ↓
-LEXER
-     ↓
-TOKENS
-     ↓
-PARSER
-     ↓
-AST
-     ↓
-SYMBOL TABLE
-     ↓
-SEMANTIC ANALYSIS
-     ↓
-RESOURCE CHECKER
-     ↓
-INTERPRETER
-     ↓
-PROFILER
-     ↓
-JIT POLICY
-     ↓
-LLVM IR
-     ↓
-LLVM ORC JIT
-     ↓
-NATIVE CODE
+SOURCE CODE (.tiny)
+        ↓
+     LEXER             → Token Stream with Line Tracking
+        ↓
+     PARSER            → Recursive-Descent LL(1) AST Construction
+        ↓
+  SYMBOL TABLE         → Scoped Environments (Global, Function, Block)
+        ↓
+SEMANTIC ANALYZER      → Type Checking & Variable Binding
+        ↓
+ RESOURCE CHECKER      → Typestate Analysis (UNOPENED -> OPEN -> CLOSED)
+        ↓
+    INTERPRETER        → AST Evaluation & Call Stack
+        ↓
+    PROFILER           → Invocation Frequency Counter (HOT/COLD)
+        ↓
+   JIT POLICY          → Candidate Selection (Hot + Numeric + Resource-Free)
+        ↓
+ CODE GENERATOR        → LLVM IR Emission (IRBuilder, SSA Form)
+        ↓
+ LLVM ORC JIT          → LLJIT Machine Code Materialization & Execution
+        ↓
+ NATIVE EXECUTION      → Direct Host CPU Execution
 ```
 
-`--jit` compiles resource-eligible numeric functions up front (student-sized policy: no on-stack replacement mid-loop). `--profile` still prints hotness and the same eligibility rules.
+---
 
-## 8. Language Specification
+## 5. Language Specification & Grammar
 
-Types: `Int`, `Handle`.
+TinyRAJIT supports two user-visible types: `Int` and `Handle` (`String` exists exclusively as an argument to `open`).
 
-```text
-let x: Int = 10;
-let h: Handle = open("data.txt");
-x = x + 1;
-if (x > 5) { ... } else { ... }
-while (i < n) { ... }
-fn add(a: Int, b: Int) -> Int { return a + b; }
-use(h); close(h);
-```
-
-Operators: `+ - * /` and `== < > <= >=`. Comments: `#` or `//`.
-
-Every program must define `fn main() -> Int` with no parameters.
-
-## 9. Grammar
-
+### Formal Grammar (EBNF)
 ```text
 program               → function+
 function              → "fn" IDENTIFIER "(" parameters? ")" "->" type block
@@ -110,212 +75,230 @@ whileStatement        → "while" "(" expression ")" block
 returnStatement       → "return" expression ";"
 expressionStatement   → call ";"
 expression            → comparison
-comparison            → addition (("=="|"<"|"<="|">"|">=") addition)*
-addition              → multiplication (("+"|"-") multiplication)*
-multiplication        → unary (("*"|"/") unary)*
+comparison            → addition (("==" | "<" | "<=" | ">" | ">=") addition)*
+addition              → multiplication (("+" | "-") multiplication)*
+multiplication        → unary (("*" | "/") unary)*
 unary                 → "-" unary | primary
 primary               → NUMBER | STRING | IDENTIFIER | call | "(" expression ")"
 call                  → IDENTIFIER "(" arguments? ")"
+arguments             → expression ("," expression)*
 ```
 
-`*` binds tighter than `+`, so `a + b * c` is `a + (b * c)`.
-
-## 10. Lexer
-
-`Lexer` (`include/Lexer.h`, `src/Lexer.cpp`) skips whitespace/comments, classifies keywords, identifiers, integers, strings, operators, and punctuation, and tracks line numbers. Invalid characters raise `LexicalError`.
-
-## 11. Parser
-
-`Parser` is recursive descent. Parse errors include the line number and the unexpected lexeme.
-
-## 12. AST
-
-Nodes: `NumberExpr`, `StringExpr`, `VariableExpr`, `BinaryExpr`, `CallExpr`, `VariableDeclStmt`, `AssignmentStmt`, `ExpressionStmt`, `ReturnStmt`, `IfStmt`, `WhileStmt`, `FunctionDecl`, `Program`. Ownership uses `std::unique_ptr`. `--ast` prints a tree via `dumpAst`.
-
-## 13. Symbol Table
-
-`SymbolTable` supports `insert`, `lookup`, `exists`, `enterScope`, `exitScope`. Symbols record name, type, kind (variable/function), scope, and parameter types.
-
-## 14. Semantic Analysis
-
-`SemanticAnalyzer` checks: declaration before use, duplicate names, unknown functions, argument count, assignment/return types, and that `open`/`use`/`close` have the right operand types (`open` takes a string; `use`/`close` take `Handle`).
-
-## 15. Resource-State Analysis
-
-Core project feature. States: `UNOPENED → open() → OPEN → close() → CLOSED`.
-
-| Rule | Result |
-| --- | --- |
-| `open` then `use` then `close` | valid |
-| `close` twice | error: already closed |
-| `use` after `close` | error: cannot use closed Handle |
-| `use` while `UNOPENED` | error: has not been opened |
-| still `OPEN` at `return` / function end | error: remains open |
-
-**If/else:** both branches are analyzed; mismatched Handle states are rejected (conservative).  
-**While:** if the loop body would change a Handle state, the program is rejected (conservative; not a full data-flow solver).  
-Handle **parameters** are treated as already `OPEN` (caller responsibility). Functions that use Handles are **not** LLVM-JIT candidates.
-
-## 16. Interpreter
-
-Tree-walking evaluator for integers, variables, arithmetic, comparisons, control flow, calls, and Handle builtins. Runs only after lexer, parser, semantics, and resource analysis succeed. Division by zero is a runtime error.
-
-## 17. Profiler
-
-`recordFunctionCall`, `getCallCount`, `isHot`. Default `HOT_THRESHOLD = 1000` (override with `--threshold N`). Function entries are counted; each `while` iteration also records heat for the current function so `calculate(1000)` appears HOT.
-
-## 18. JIT Policy
-
-A function is compiled only if it is **numeric** (Int-only, no Handle builtins) **and** resource-eligible (no Handle usage, including callees). Printed as:
-
-```text
-[JIT Eligibility]
-Function: calculate
-Hot: YES
-Resource Eligible: YES
-Decision: JIT COMPILE
-```
-
-`--jit` compiles all resource-eligible numeric functions (not only those already hot), which is appropriate for a one-shot student driver.
-
-## 19. LLVM IR
-
-`CodeGenerator` uses `llvm::IRBuilder` for constants, locals, arithmetic, comparisons, `return`, `if`, `while`, and calls among eligible functions. `--print-ir` dumps the module.
-
-## 20. LLVM ORC JIT
-
-`JITCompiler` initializes native targets, builds `llvm::orc::LLJIT`, adds the IR module, looks up a symbol, and invokes it. Only the numeric subset is compiled; Handle code stays in the interpreter.
-
-## 21. Project Structure
-
-```text
-ResourceAwareJIT/
-├── CMakeLists.txt
-├── README.md
-├── .gitignore
-├── examples/
-│   ├── hello.tiny
-│   ├── arithmetic.tiny
-│   ├── function.tiny
-│   ├── if_else.tiny
-│   ├── loop.tiny
-│   ├── resource_valid.tiny
-│   ├── resource_double_close.tiny
-│   ├── resource_use_after_close.tiny
-│   ├── resource_unclosed.tiny
-│   └── hot_function.tiny
-├── include/          Token, Lexer, AST, Parser, SymbolTable, SemanticAnalyzer,
-│                     ResourceChecker, Interpreter, Profiler, JITPolicy,
-│                     CodeGenerator, JITCompiler, Error
-├── src/              matching .cpp files + main.cpp
-└── tests/            lexer, parser, semantic, resource, interpreter, profiler
-```
-
-## 22. Build Instructions
-
-**Expected LLVM:** 14 through 21 (needs `LLVMConfig.cmake`, `IRBuilder`, and `orc::LLJIT`). Do not hardcode `C:/LLVM/...`; CMake uses `find_package(LLVM REQUIRED CONFIG)`.
-
-Ubuntu/Debian:
-
-```bash
-sudo apt install cmake g++ llvm-dev
-cmake -S . -B build
-cmake --build build
-ctest --test-dir build --output-on-failure
-```
-
-MSYS2 UCRT64:
-
-```bash
-pacman -S mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-llvm
-cmake -S . -B build -G "MinGW Makefiles"
-cmake --build build
-ctest --test-dir build --output-on-failure
-```
-
-If CMake cannot find LLVM, pass `-DLLVM_DIR=/path/to/lib/cmake/llvm`.
-
-## 23. Run Instructions
-
-```bash
-resourcejit examples/hello.tiny
-resourcejit --tokens examples/arithmetic.tiny
-resourcejit --ast examples/arithmetic.tiny
-resourcejit --check examples/resource_valid.tiny
-resourcejit --run examples/function.tiny
-resourcejit --profile examples/hot_function.tiny
-resourcejit --print-ir examples/function.tiny
-resourcejit --jit examples/function.tiny
-resourcejit --benchmark examples/loop.tiny
-resourcejit --threshold 100 examples/hot_function.tiny
-```
-
-## 24. Example Programs
-
-| File | Role |
-| --- | --- |
-| `hello.tiny` | return 42 |
-| `arithmetic.tiny` | locals and `+` |
-| `function.tiny` | `add(10,20)` → 30 |
-| `if_else.tiny` | branch |
-| `loop.tiny` | `calculate(10)` → 45 |
-| `resource_valid.tiny` | open/use/close |
-| `resource_double_close.tiny` | rejected |
-| `resource_use_after_close.tiny` | rejected |
-| `resource_unclosed.tiny` | rejected |
-| `hot_function.tiny` | profile `calculate(1000)` |
-
-## 25. Test Cases
-
-| Test | Coverage |
-| --- | --- |
-| `lexer_test` | keywords, identifiers, numbers, operators, `@` |
-| `parser_test` | function, bad syntax, precedence, if, while |
-| `semantic_test` | undeclared, duplicate, type mismatch, bad call |
-| `resource_test` | valid, double close, use-after-close, use-before-open, leak |
-| `interpreter_test` | arithmetic, variables, functions, if, loops |
-| `profiler_test` | counts and HOT detection |
-
-Each test prints `PASS:` / `FAIL:` and exits non-zero on failure.
-
-## 26. Benchmarking
-
-`--benchmark` is a **prototype measurement**. It times one interpreter run, JIT compilation, and one JIT execution of `main` when `main` is eligible. Numbers are measured on the host; they are not claimed as research results.
-
-```text
-Prototype measurement (not a production benchmark)
-Interpreter Time: X ms
-JIT Compilation Time: Y ms
-JIT Execution Time: Z ms
-```
-
-## 27. Limitations
-
-- One resource type (`Handle`); no real OS file I/O (open is a protocol object).
-- Conservative `if`/`while` resource analysis.
-- No interprocedural Handle tracking beyond “function uses Handles”.
-- JIT subset is Int-only; at most four JIT arguments in the invoke helper.
-- No SSA optimizations, inlining pipeline, or deoptimization.
-- Profiler heat includes loop iterations; it is not hardware performance counters.
-
-## 28. Future Scope
-
-Smarter path-sensitive resource DFG, real file descriptors, on-stack replacement after a hotness threshold, and a larger language subset (booleans as a distinct type, more LLVM types).
+*Operator Precedence:* Multiplication and division bind tighter than addition and subtraction. Comparisons have lowest arithmetic precedence. `a + b * c` parses as `a + (b * c)`.
 
 ---
 
-## Phase 2 requirement mapping
+## 6. Core Modules
 
-| Academic requirement | This project |
-| --- | --- |
-| Lexical Analysis | `Lexer` |
-| Syntax Analysis | Recursive-descent `Parser` |
-| AST | AST classes + `dumpAst` |
-| Semantic Analysis | `SemanticAnalyzer` |
-| Symbol Table | `SymbolTable` |
-| Intermediate Code | LLVM IR (`CodeGenerator`) |
-| Interpreter / Execution Engine | `Interpreter` |
-| Error Handling | Lexer + Parser + Semantic + Resource + Runtime + JIT |
-| Additional project feature | `ResourceChecker` |
-| Additional runtime feature | `Profiler` |
-| Advanced extension | LLVM ORC JIT (`JITCompiler`) |
+| Module | Source / Header | Responsibility |
+| :--- | :--- | :--- |
+| **Lexer** | `src/Lexer.cpp`, `include/Lexer.h` | Scans source text, categorizes tokens, tracks line numbers, rejects invalid characters. |
+| **Parser & AST** | `src/Parser.cpp`, `include/AST.h` | Builds strongly-typed AST with `std::unique_ptr` ownership; provides `dumpAst()`. |
+| **Symbol Table** | `src/SymbolTable.cpp`, `include/SymbolTable.h` | Manages nested lexical scopes, type bindings, and function signatures. |
+| **Semantic Analyzer** | `src/SemanticAnalyzer.cpp`, `include/SemanticAnalyzer.h` | Type checking, undeclared variable detection, call arity, and `main()` enforcement. |
+| **Resource Checker** | `src/ResourceChecker.cpp`, `include/ResourceChecker.h` | Typestate checker: verifies `UNOPENED -> OPEN -> CLOSED`, detects leaks and double-close. |
+| **Interpreter** | `src/Interpreter.cpp`, `include/Interpreter.h` | Tree-walk evaluator for integer arithmetic, variables, loops, branches, and mock handles. |
+| **Profiler** | `src/Profiler.cpp`, `include/Profiler.h` | Counts runtime invocations, determines hotness against configurable threshold. |
+| **JIT Policy** | `src/JITPolicy.cpp`, `include/JITPolicy.h` | Filters candidates: only hot, pure numeric functions without handles qualify for JIT. |
+| **Code Generator** | `src/CodeGenerator.cpp`, `include/CodeGenerator.h` | Generates verified SSA LLVM IR using `llvm::IRBuilder`. |
+| **JIT Compiler** | `src/JITCompiler.cpp`, `include/JITCompiler.h` | Instantiates `llvm::orc::LLJIT`, materializes native code, invokes function pointers. |
+
+---
+
+## 7. Project Structure
+
+```text
+TinyRAJIT/
+├── CMakeLists.txt
+├── README.md
+├── .gitignore
+├── include/
+│   ├── AST.h
+│   ├── CodeGenerator.h
+│   ├── Error.h
+│   ├── Interpreter.h
+│   ├── JITCompiler.h
+│   ├── JITPolicy.h
+│   ├── Lexer.h
+│   ├── Parser.h
+│   ├── Profiler.h
+│   ├── ResourceChecker.h
+│   ├── SemanticAnalyzer.h
+│   ├── SymbolTable.h
+│   └── Token.h
+├── src/
+│   ├── AST.cpp
+│   ├── CodeGenerator.cpp
+│   ├── Interpreter.cpp
+│   ├── JITCompiler.cpp
+│   ├── JITPolicy.cpp
+│   ├── Lexer.cpp
+│   ├── NoLLVMBackend.cpp
+│   ├── Parser.cpp
+│   ├── Profiler.cpp
+│   ├── ResourceChecker.cpp
+│   ├── SemanticAnalyzer.cpp
+│   ├── SymbolTable.cpp
+│   └── main.cpp
+├── examples/
+│   ├── arithmetic.tiny
+│   ├── function.tiny
+│   ├── hello.tiny
+│   ├── hot_function.tiny
+│   ├── if_else.tiny
+│   ├── lexical_error.tiny
+│   ├── loop.tiny
+│   ├── resource_double_close.tiny
+│   ├── resource_unclosed.tiny
+│   ├── resource_use_after_close.tiny
+│   ├── resource_valid.tiny
+│   ├── semantic_error.tiny
+│   └── syntax_error.tiny
+├── tests/
+│   ├── interpreter_test.cpp
+│   ├── jit_test.cpp
+│   ├── lexer_test.cpp
+│   ├── parser_test.cpp
+│   ├── profiler_test.cpp
+│   ├── resource_test.cpp
+│   ├── semantic_test.cpp
+│   └── test_support.h
+└── docs/
+    ├── IMPLEMENTATION_STATUS.md
+    ├── REVIEW2_DEMO.md
+    ├── REVIEW2_EVIDENCE.md
+    ├── REVIEW2_REQUIREMENTS.md
+    ├── TECHNICAL_CHALLENGES.md
+    └── VIVA.md
+```
+
+---
+
+## 8. Build Instructions
+
+### Prerequisites
+* C++17 compatible compiler (GCC 15+, Clang 14+, or MSVC 2019+)
+* CMake $\ge$ 3.16 and Ninja (or Make)
+* LLVM 14 through 22 (`LLVMConfig.cmake`, `IRBuilder`, `orc::LLJIT`)
+
+### Windows (MSYS2 UCRT64 — Verified Environment)
+```powershell
+$env:PATH = "C:\msys64\ucrt64\bin;C:\msys64\usr\bin;" + $env:PATH
+cmake -G Ninja -S . -B build
+cmake --build build
+ctest --test-dir build --output-on-failure
+```
+
+### Linux / Ubuntu / WSL2
+```bash
+sudo apt update && sudo apt install -y cmake g++ ninja-build llvm-dev
+cmake -G Ninja -S . -B build
+cmake --build build
+ctest --test-dir build --output-on-failure
+```
+
+### Frontend-Only Build (No LLVM installed)
+```bash
+cmake -S . -B build -DTINYRAJIT_ENABLE_JIT=OFF
+cmake --build build
+ctest --test-dir build --output-on-failure
+```
+
+---
+
+## 9. Command-Line Interface (CLI)
+
+```bash
+# Print discrete token stream
+resourcejit --tokens examples/arithmetic.tiny
+
+# Print Abstract Syntax Tree
+resourcejit --ast examples/arithmetic.tiny
+
+# Perform static semantic and typestate resource analysis
+resourcejit --check examples/resource_valid.tiny
+
+# Run via AST Interpreter (default)
+resourcejit --run examples/function.tiny
+resourcejit examples/function.tiny
+
+# Profile runtime execution and inspect JIT policy decision
+resourcejit --profile examples/hot_function.tiny
+resourcejit --threshold 100 --profile examples/hot_function.tiny
+
+# Emit verified SSA LLVM IR
+resourcejit --print-ir examples/function.tiny
+
+# Compile and execute natively using LLVM ORC JIT
+resourcejit --jit examples/function.tiny
+
+# Measure interpreter vs JIT execution timing
+resourcejit --benchmark examples/loop.tiny
+```
+
+---
+
+## 10. Automated Test Suite (CTest)
+
+TinyRAJIT includes 7 dedicated test executables:
+
+```bash
+ctest --test-dir build --output-on-failure
+```
+
+| Test Target | Covered Functionality | Status |
+| :--- | :--- | :---: |
+| `lexer_test` | Keywords, identifiers, literals, operators, `@` error, string termination | **PASSED** |
+| `parser_test` | Declarations, precedence (`+` vs `*`), loops, conditionals, syntax errors | **PASSED** |
+| `semantic_test` | Scoped lookup, undeclared variables, duplicates, call arity, type checking | **PASSED** |
+| `resource_test` | Valid lifecycle, double-close, use-after-close, leaks at return, branch checks | **PASSED** |
+| `interpreter_test` | Arithmetic, call frames, return propagation, loops, conditionals | **PASSED** |
+| `profiler_test` | Invocations counting, hot threshold detection, loop heat propagation | **PASSED** |
+| `jit_test` | IR emission, LLVM verifier, native ORC JIT execution, interpreter parity | **PASSED** |
+
+**Pass Rate:** 100% (7/7 tests passed in 0.22 seconds).
+
+---
+
+## 11. Review 2 Demonstration Sequence
+
+For the viva demonstration, execute the following commands in order:
+
+1. **Lexical Analysis:**  
+   `.\build\resourcejit.exe --tokens examples\arithmetic.tiny`
+2. **AST & Operator Precedence:**  
+   `.\build\resourcejit.exe --ast examples\arithmetic.tiny`
+3. **Semantic Error Detection:**  
+   `.\build\resourcejit.exe --check examples\semantic_error.tiny`
+4. **Valid Resource Typestate:**  
+   `.\build\resourcejit.exe --check examples\resource_valid.tiny`
+5. **Resource Error (Double Close):**  
+   `.\build\resourcejit.exe --check examples\resource_double_close.tiny`
+6. **Resource Error (Use-After-Close):**  
+   `.\build\resourcejit.exe --check examples\resource_use_after_close.tiny`
+7. **Resource Error (Leak at Exit):**  
+   `.\build\resourcejit.exe --check examples\resource_unclosed.tiny`
+8. **AST Interpreter Execution:**  
+   `.\build\resourcejit.exe --run examples\function.tiny`
+9. **Runtime Profiling & Policy:**  
+   `.\build\resourcejit.exe --profile examples\hot_function.tiny`
+10. **LLVM IR Generation:**  
+    `.\build\resourcejit.exe --print-ir examples\function.tiny`
+11. **LLVM ORC JIT Native Execution:**  
+    `.\build\resourcejit.exe --jit examples\function.tiny`
+
+*(Refer to [`docs/REVIEW2_DEMO.md`](docs/REVIEW2_DEMO.md) for spoken explanations during the viva).*
+
+---
+
+## 12. Limitations & Future Scope
+
+### Current Limitations
+* Type system restricted to `Int` and `Handle`.
+* Conservative typestate analysis on loops (disallows state mutations inside `while` bodies).
+* JIT compiles at whole-function boundaries rather than supporting On-Stack Replacement (OSR) for loops.
+
+### Future Scope
+* Interprocedural typestate dataflow analysis supporting handle transfer with move semantics.
+* On-Stack Replacement (OSR) for native compilation of long-running loops.
+* LLVM optimization pass pipeline (constant propagation, dead-code elimination, vectorization).

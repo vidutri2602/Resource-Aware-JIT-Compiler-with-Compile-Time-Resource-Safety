@@ -1,6 +1,7 @@
 #pragma once
 
 #include "AST.h"
+#include "Interpreter.h"
 
 #include <cstdint>
 #include <memory>
@@ -10,7 +11,7 @@
 
 namespace tinyrjit {
 
-class JITCompiler {
+class JITCompiler : public CompiledFunctionHost {
  public:
   JITCompiler();
   ~JITCompiler();
@@ -20,8 +21,8 @@ class JITCompiler {
 
   void compile(const Program& program, const std::unordered_set<std::string>& eligible);
   const std::string& ir() const { return ir_; }
-  bool hasCompiled(const std::string& name) const;
-  std::int32_t invoke(const std::string& name, const std::vector<std::int32_t>& args);
+  bool hasCompiled(const std::string& name) const override;
+  std::int32_t invoke(const std::string& name, const std::vector<std::int32_t>& args) override;
 
  private:
   struct Impl;

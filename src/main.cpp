@@ -43,11 +43,10 @@ void printUsage(const char* argv0) {
             << "  --threshold N  hotness threshold (default 1000)\n";
 }
 
-tinyrjit::Program frontend(const std::string& source, bool dumpTokens, bool dumpAst,
-                             tinyrjit::ResourceChecker& checker) {
+std::vector<tinyrjit::Token> runLex(const std::string& source, bool dump) {
   tinyrjit::Lexer lexer(source);
   auto tokens = lexer.tokenize();
-  if (dumpTokens) {
+  if (dump) {
     for (const auto& token : tokens) {
       std::cout << tinyrjit::tokenTypeName(token.type);
       if (token.type == tinyrjit::TokenType::Identifier ||
@@ -58,17 +57,22 @@ tinyrjit::Program frontend(const std::string& source, bool dumpTokens, bool dump
       std::cout << "\n";
     }
   }
+  return tokens;
+}
 
+tinyrjit::Program runParse(std::vector<tinyrjit::Token> tokens, bool dump) {
   tinyrjit::Parser parser(std::move(tokens));
   tinyrjit::Program program = parser.parse();
-  if (dumpAst) {
+  if (dump) {
     std::cout << tinyrjit::dumpAst(program);
   }
+  return program;
+}
 
+void runCheck(tinyrjit::Program& program, tinyrjit::ResourceChecker& checker) {
   tinyrjit::SemanticAnalyzer semantics;
   semantics.analyze(program);
   checker.check(program);
-  return program;
 }
 
 void printResourceOk(const tinyrjit::ResourceChecker& checker) {
@@ -140,8 +144,22 @@ int main(int argc, char** argv) {
 
   try {
     std::string source = readFile(path);
+
+    // Stage 1: Lexical Analysis
+    auto tokens = runLex(source, dumpTokens);
+    if (dumpTokens) {
+      return 0;
+    }
+
+    // Stage 2: Syntax Analysis (Parser & AST)
+    tinyrjit::Program program = runParse(std::move(tokens), dumpAst);
+    if (dumpAst) {
+      return 0;
+    }
+
+    // Stage 3: Semantic Analysis & Compile-Time Resource Safety Checking
     tinyrjit::ResourceChecker checker;
-    tinyrjit::Program program = frontend(source, dumpTokens, dumpAst, checker);
+    runCheck(program, checker);
 
     if (checkOnly) {
       printResourceOk(checker);
@@ -150,6 +168,7 @@ int main(int argc, char** argv) {
 
     auto eligible = tinyrjit::JITPolicy::computeEligible(program, checker);
 
+    // Stage 4: LLVM IR Generation
     if (printIr) {
       tinyrjit::CodeGenerator gen;
       std::cout << gen.generate(program, eligible);
@@ -164,9 +183,10 @@ int main(int argc, char** argv) {
       policy.markNumeric(fn->name, eligible.count(fn->name) != 0);
     }
 
-    tinyrjit::JITCompiler compiler;
+    // Stage 5: LLVM ORC JIT Compilation and Execution
     if (jit || benchmark) {
       auto t0 = std::chrono::high_resolution_clock::now();
+      tinyrjit::JITCompiler compiler;
       compiler.compile(program, eligible);
       auto t1 = std::chrono::high_resolution_clock::now();
       double compileMs =
@@ -216,6 +236,7 @@ int main(int argc, char** argv) {
       }
     }
 
+    // Stage 6: AST-Based Interpreter & Profiler
     tinyrjit::Interpreter interpreter(profiler, nullptr);
     std::int32_t result = interpreter.interpret(program);
     if (run || profile) {

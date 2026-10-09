@@ -1,5 +1,7 @@
 /build/
+/build_msys_check/
 /build_wsl/
+/build_ninja/
 /out/
 /cmake-build-*/
 CMakeCache.txt

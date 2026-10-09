@@ -11,7 +11,15 @@
 
 namespace tinyrjit {
 
-class JITCompiler;
+// Interpreter may call into JIT-compiled numeric functions without linking LLVM
+// into frontend tests. The driver passes a JITCompiler; tests pass nullptr.
+class CompiledFunctionHost {
+ public:
+  virtual ~CompiledFunctionHost() = default;
+  virtual bool hasCompiled(const std::string& name) const = 0;
+  virtual std::int32_t invoke(const std::string& name,
+                              const std::vector<std::int32_t>& args) = 0;
+};
 
 struct Value {
   TypeKind type = TypeKind::Int;
@@ -22,7 +30,7 @@ struct Value {
 
 class Interpreter {
  public:
-  Interpreter(Profiler& profiler, JITCompiler* jit);
+  Interpreter(Profiler& profiler, CompiledFunctionHost* jit);
 
   std::int32_t interpret(const Program& program);
 
@@ -30,7 +38,7 @@ class Interpreter {
   using Env = std::unordered_map<std::string, Value>;
 
   Profiler& profiler_;
-  JITCompiler* jit_;
+  CompiledFunctionHost* jit_;
   const Program* program_ = nullptr;
   std::string currentFunction_;
   std::unordered_map<std::string, const FunctionDecl*> functions_;
